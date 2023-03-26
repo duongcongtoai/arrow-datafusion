@@ -1,0 +1,17 @@
+[package]
+name = "playground"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+
+datafusion = { path = "../datafusion/core", version = "20.0.0" }
+tokio = { version = "1.24", features = ["macros", "rt", "rt-multi-thread", "sync", "parking_lot"] }
+futures = "0.3"
+datafusion-common = { path = "../datafusion/common", version = "20.0.0", features = ["parquet", "object_store"] }
+arrow = { workspace = true }
+datafusion-physical-expr = { path = "../datafusion/physical-expr", version = "20.0.0", default-features = false }
+datafusion-sql = { path = "../datafusion/sql", version = "20.0.0" }
+chrono = "0.4.24"
