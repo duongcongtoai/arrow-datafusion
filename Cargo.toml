@@ -33,6 +33,7 @@ members = [
     "datafusion-examples",
     "test-utils",
     "benchmarks",
+    "playground"
 ]
 
 [workspace.package]
