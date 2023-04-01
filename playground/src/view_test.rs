@@ -5,7 +5,7 @@ use crate::new_plan_with_partition;
 
 pub async fn create_view_plan() -> datafusion_common::Result<()> {
     let ctx = SessionContext::new();
-    new_plan_with_partition(&ctx, "first", 1).await?;
+    new_plan_with_partition(&ctx, "first", 1, false).await?;
     let sql = r#"
         CREATE TABLE second AS
 SELECT * FROM first WHERE 1=0;
