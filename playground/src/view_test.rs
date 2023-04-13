@@ -1,7 +1,7 @@
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::SessionContext;
 
-use crate::new_plan_with_partition;
+use crate::util::new_plan_with_partition;
 
 pub async fn create_view_plan() -> datafusion_common::Result<()> {
     let ctx = SessionContext::new();

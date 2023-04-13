@@ -1,0 +1,9 @@
+default
+select id, 
+class,
+value,
+SUM(value) OVER (PARTITION BY class ORDER BY ID ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) as avg_class_value
+from first
+order by id
+
+

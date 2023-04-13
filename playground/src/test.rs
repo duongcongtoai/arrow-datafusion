@@ -8,17 +8,20 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use datafusion::catalog::schema::SchemaProvider;
 use datafusion::datasource::TableProvider;
 use datafusion::logical_expr::{AggregateUDF, LogicalPlan, ScalarUDF, TableSource};
-use datafusion::optimizer::{OptimizerContext, OptimizerRule};
 use datafusion::optimizer::optimizer::Optimizer;
+use datafusion::optimizer::{OptimizerContext, OptimizerRule};
 use datafusion::prelude::SessionContext;
 use datafusion::sql::planner::{ContextProvider, SqlToRel};
 use datafusion::sql::sqlparser::ast::Statement;
 use datafusion::sql::sqlparser::parser::Parser;
-use datafusion_common::{DataFusionError, Result, TableReference};
 use datafusion_common::config::ConfigOptions;
+use datafusion_common::{DataFusionError, Result, TableReference};
 use datafusion_sql::sqlparser::dialect::GenericDialect;
 
-pub async fn optimize_test(ctx: &SessionContext, sql: &str) -> Result<(LogicalPlan, LogicalPlan)> {
+pub async fn optimize_test(
+    ctx: &SessionContext,
+    sql: &str,
+) -> Result<(LogicalPlan, LogicalPlan)> {
     let dialect = GenericDialect {}; // or AnsiDialect, or your own dialect ...
     let ast: Vec<Statement> = Parser::parse_sql(&dialect, sql).unwrap();
     let statement = &ast[0];
@@ -98,7 +101,6 @@ impl ContextProvider for FixedTableProvider {
         &self.options
     }
 }
-
 
 struct MyTableSource {
     schema: SchemaRef,
