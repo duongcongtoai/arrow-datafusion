@@ -2089,6 +2089,11 @@ pub struct RecursiveQuery {
     pub is_distinct: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct DelimGet {
+    pub columns: Vec<Column>,
+}
+
 /// Values expression. See
 /// [Postgres VALUES](https://www.postgresql.org/docs/current/queries-values.html)
 /// documentation for more details.

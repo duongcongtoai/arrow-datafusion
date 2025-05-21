@@ -1343,9 +1343,6 @@ impl DependentJoinTracker {
             self.nodes
                 .insert(dependent_join_node.id, dependent_join_node);
             return self.rewrite_from_root();
-        } else {
-            // TODO: some of the expr was removed and expect to be pulled up in a best effort fashion
-            // (i.e partially decorrelate)
         }
         if self.get_children_subquery_ids(&dependent_join_node).len() > 1 {
             unimplemented!(
@@ -2049,7 +2046,65 @@ mod tests {
     }
     #[test]
     fn one_simple_and_one_complex_subqueries_at_the_same_level() -> Result<()> {
-        unimplemented!()
+        let outer_table = test_table_scan_with_name("outer_table")?;
+        let inner_table_lv1 = test_table_scan_with_name("inner_table_lv1")?;
+        let in_sq_level1 = Arc::new(
+            LogicalPlanBuilder::from(inner_table_lv1.clone())
+                .filter(col("inner_table_lv1.c").eq(lit(2)))?
+                .project(vec![col("inner_table_lv1.a")])?
+                .build()?,
+        );
+
+        let scalar_count_sq_level1 = Arc::new(
+            LogicalPlanBuilder::from(inner_table_lv1)
+                .filter(
+                    col("inner_table_lv1.a")
+                        .eq(out_ref_col(ArrowDataType::UInt32, "outer_table.a"))
+                        .and(
+                            out_ref_col(ArrowDataType::UInt32, "outer_table.a")
+                                .gt(col("inner_table_lv1.c")),
+                        )
+                        .and(col("inner_table_lv1.b").eq(lit(1)))
+                        .and(
+                            out_ref_col(ArrowDataType::UInt32, "outer_table.b")
+                                .eq(col("inner_table_lv1.b")),
+                        ),
+                )?
+                .aggregate(Vec::<Expr>::new(), vec![count(col("inner_table_lv1.a"))])?
+                .project(vec![count(col("inner_table_lv1.a")).alias("count_a")])?
+                .build()?,
+        );
+
+        let input1 = LogicalPlanBuilder::from(outer_table.clone())
+            .filter(
+                col("outer_table.a")
+                    .gt(lit(1))
+                    .and(in_subquery(col("outer_table.c"), in_sq_level1))
+                    .and(
+                        col("outer_table.b").gt(scalar_subquery(scalar_count_sq_level1)),
+                    ),
+            )?
+            .build()?;
+        let mut index = DependentJoinTracker::new(Arc::new(AliasGenerator::new()));
+        index.build(input1)?;
+        println!("{:?}", index);
+        let new_plan = index.root_dependent_join_elimination()?;
+        println!("{}", new_plan);
+        let expected = "\
+        LeftSemi Join:  Filter: outer_table.b = __in_sq_2.a\
+        \n  Filter: __exists_sq_1.mark\
+        \n    LeftMark Join:  Filter: Boolean(true)\
+        \n      Filter: outer_table.a > Int32(1)\
+        \n        TableScan: outer_table\
+        \n      SubqueryAlias: __exists_sq_1\
+        \n        Filter: inner_table_lv1.a AND inner_table_lv1.b = Int32(1)\
+        \n          TableScan: inner_table_lv1\
+        \n  SubqueryAlias: __in_sq_2\
+        \n    Projection: inner_table_lv1.a\
+        \n      Filter: inner_table_lv1.c = Int32(2)\
+        \n        TableScan: inner_table_lv1";
+        assert_eq!(expected, format!("{new_plan}"));
+        Ok(())
     }
     #[test]
     fn two_simple_subqueries_at_the_same_level() -> Result<()> {
@@ -2079,9 +2134,7 @@ mod tests {
             .build()?;
         let mut index = DependentJoinTracker::new(Arc::new(AliasGenerator::new()));
         index.build(input1)?;
-        println!("{:?}", index);
         let new_plan = index.root_dependent_join_elimination()?;
-        println!("{}", new_plan);
         let expected = "\
         LeftSemi Join:  Filter: outer_table.b = __in_sq_2.a\
         \n  Filter: __exists_sq_1.mark\
