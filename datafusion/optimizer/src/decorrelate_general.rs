@@ -53,7 +53,7 @@ struct Unnesting {
 pub struct DependentJoinDecorrelator {
     // immutable, defined when this object is constructed
     domains: IndexSet<Column>,
-    parent: Option<Box<DependentJoinDecorrelator>>,
+    is_initial: bool,
     // correlated_map: init with the list of correlated column of dependent join
     // map from Column to the original index in correlated_columns v
     correlated_map: HashMap<Column, usize>,
@@ -95,7 +95,7 @@ impl DependentJoinDecorrelator {
     ) -> Result<LogicalPlan> {
         let perform_delim = true;
         let left = node.left.as_ref();
-        let new_left = if let Some(ref parent) = self.parent {
+        let new_left = if !self.is_initial {
             // TODO: revisit this check
             // because after decorrelation at parent level
             // this correlated_columns list are not mutated yet
@@ -124,7 +124,7 @@ impl DependentJoinDecorrelator {
                 .map(|(_, col, _)| col.clone())
                 .unique()
                 .collect(),
-            parent: Some(Box::new(self.clone())),
+            is_initial: false,
             correlated_map: HashMap::new(), // TODO
             replacement_map: HashMap::new(),
             any_join: false,
@@ -1230,7 +1230,7 @@ impl OptimizerRule for Decorrelation {
             println!("here");
             let mut decorrelator = DependentJoinDecorrelator {
                 domains: IndexSet::new(),
-                parent: None,
+                is_initial: true,
                 correlated_map: HashMap::new(),
                 replacement_map: HashMap::new(),
                 any_join: false,
