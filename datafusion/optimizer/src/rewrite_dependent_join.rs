@@ -701,13 +701,22 @@ impl TreeNodeRewriter for DependentJoinRewriter {
                 }
             }
             LogicalPlan::Join(join) => {
-                let mut sq_count = if let LogicalPlan::Subquery(_) = &join.left.as_ref() {
-                    1
-                } else {
-                    0
-                };
-                sq_count += if let LogicalPlan::Subquery(_) = join.right.as_ref() {
-                    1
+                let mut sq_count =
+                    if let LogicalPlan::Subquery(subquery) = &join.left.as_ref() {
+                        if !subquery.outer_ref_columns.is_empty() {
+                            1
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+                sq_count += if let LogicalPlan::Subquery(subquery) = join.right.as_ref() {
+                    if !subquery.outer_ref_columns.is_empty() {
+                        1
+                    } else {
+                        0
+                    }
                 } else {
                     0
                 };
@@ -1026,6 +1035,22 @@ mod tests {
             TableScan: inner_table_lv1 [a:UInt32, b:UInt32, c:UInt32]
         ");
         Ok(())
+    }
+
+    macro_rules! assert_dependent_join_rewrite_unchanged {
+        (
+            $plan:expr,
+            @ $expected:literal $(,)?
+        ) => {{
+            let mut index = DependentJoinRewriter::new(Arc::new(AliasGenerator::new()));
+            let transformed = index.rewrite_subqueries_into_dependent_joins($plan)?;
+            assert!(!transformed.transformed);
+            let display = transformed.data.display_indent_schema();
+            assert_snapshot!(
+                display,
+                @ $expected,
+            )
+        }};
     }
 
     #[test]
@@ -1980,9 +2005,95 @@ mod tests {
             TableScan: t0 [c0:Time64(Second), c1:Float64]
             Projection: Utf8("13:35:07") [Utf8("13:35:07"):Utf8]
               TableScan: t1 [c0:Int32]
-        "#
+"#);
+        Ok(())
+    }
+
+    #[test]
+    fn test_join_with_uncorrelated_subquery() -> Result<()> {
+        // SQL equivalent:
+        // CREATE TABLE orders (
+        //   id INT,
+        //   customer_id INT,
+        //   total DECIMAL
+        // );
+        //
+        // CREATE TABLE customers (
+        //   id INT,
+        //   name VARCHAR,
+        //   country VARCHAR
+        // );
+        //
+        // SELECT orders.id
+        // FROM orders
+        // JOIN (
+        //   SELECT id, name
+        //   FROM customers
+        //   WHERE country = 'USA'
+        // );
+
+        // Create base tables
+        let orders = test_table_with_columns(
+            "orders",
+            &[
+                ("id", DataType::Int32),
+                ("customer_id", DataType::Int32),
+                ("total", DataType::Float64),
+            ],
+        )?;
+
+        let customers = test_table_with_columns(
+            "customers",
+            &[
+                ("id", DataType::Int32),
+                ("name", DataType::Utf8),
+                ("country", DataType::Utf8),
+            ],
+        )?;
+
+        // Build the subquery:
+        // SELECT id, name FROM customers WHERE country = 'USA'
+        let customer_subquery = Arc::new(
+            LogicalPlanBuilder::from(customers)
+                .filter(col("country").eq(lit("USA")))? // WHERE country = 'USA'
+                .project(vec![col("id"), col("name")])? // SELECT id, name
+                .build()?,
         );
 
+        // Build main query:
+        // SELECT orders.id
+        // FROM orders o
+        // JOIN (subquery)
+        let plan = LogicalPlanBuilder::from(orders)
+            .join_on(
+                LogicalPlan::Subquery(Subquery {
+                    subquery: customer_subquery,
+                    outer_ref_columns: vec![], // No correlated columns
+                    spans: Spans::new(),
+                }),
+                JoinType::Inner,
+                vec![],
+            )?
+            .project(vec![col("orders.id")])?
+            .build()?;
+
+        // Projection: orders.id
+        //   Cross Join:
+        //     TableScan: orders
+        //     Subquery:
+        //       Projection: customers.id, customers.name
+        //         Filter: customers.country = Utf8("USA")
+        //           TableScan: customers
+
+        assert_dependent_join_rewrite_unchanged!(plan, @r#"
+        Projection: orders.id [id:Int32]
+          Cross Join:  [id:Int32, customer_id:Int32, total:Float64, id:Int32, name:Utf8]
+            TableScan: orders [id:Int32, customer_id:Int32, total:Float64]
+            Subquery: [id:Int32, name:Utf8]
+              Projection: customers.id, customers.name [id:Int32, name:Utf8]
+                Filter: customers.country = Utf8("USA") [id:Int32, name:Utf8, country:Utf8]
+                  TableScan: customers [id:Int32, name:Utf8, country:Utf8]
+    "#);
         Ok(())
     }
 }
