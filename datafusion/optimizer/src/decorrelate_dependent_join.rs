@@ -289,7 +289,12 @@ impl DependentJoinDecorrelator {
             new_left
         } else {
             self.init(node);
-            self.decorrelate_from_root(left.clone())?
+            // self.decorrelate_from_root(left.clone())?
+            let mut new_independent_root = Self::new_root();
+            new_independent_root.delim_scan_id = self.delim_scan_id;
+            let new_left = new_independent_root.decorrelate_from_root(left.clone())?;
+            self.delim_scan_id = new_independent_root.delim_scan_id;
+            new_left
         };
         let lateral_depth = 0;
         // let propagate_null_values = node.propagate_null_value();
@@ -1218,13 +1223,145 @@ mod tests {
         ");
         Ok(())
     }
+
+    #[test]
     fn uncorrelated_subquery_parent_followed_by_correlated_subquery_on_lhs() -> Result<()>
     {
+        let outer_table = test_table_scan_with_name("outer_table")?;
+        let rhs_inner_table_lv1 = test_table_scan_with_name("rhs_inner_table_lv1")?;
+        let lhs_inner_table_lv1 = test_table_scan_with_name("lhs_inner_table_lv1")?;
+        let lhs_in_sq_level1 = Arc::new(
+            LogicalPlanBuilder::from(lhs_inner_table_lv1.clone())
+                .filter(
+                    col("lhs_inner_table_lv1.c")
+                        .eq(out_ref_col(ArrowDataType::UInt32, "outer_table.c")),
+                )?
+                .project(vec![col("lhs_inner_table_lv1.a")])?
+                .build()?,
+        );
+        let rhs_exists_sq_level1 = Arc::new(
+            LogicalPlanBuilder::from(rhs_inner_table_lv1)
+                .filter(col("rhs_inner_table_lv1.b").eq(lit(1)))?
+                .build()?,
+        );
+        let lhs_plan_with_sq = Arc::new(
+            LogicalPlanBuilder::from(outer_table.clone())
+                .filter(
+                    col("outer_table.a")
+                        .gt(lit(1))
+                        .and(in_subquery(col("outer_table.a"), lhs_in_sq_level1)),
+                )?
+                .build()?,
+        );
+
+        let plan = LogicalPlanBuilder::from(lhs_plan_with_sq)
+            .filter(
+                col("outer_table.a")
+                    .gt(lit(1))
+                    .and(exists(rhs_exists_sq_level1)),
+            )?
+            .build()?;
+        println!("{plan}");
+        // Filter: outer_table.a > Int32(1) AND EXISTS (<subquery>)
+        //   Subquery:
+        //     Filter: rhs_inner_table_lv1.b = Int32(1)
+        //       TableScan: rhs_inner_table_lv1
+        //   Filter: outer_table.a > Int32(1) AND outer_table.a IN (<subquery>)
+        //     Subquery:
+        //       Projection: lhs_inner_table_lv1.a
+        //         Filter: lhs_inner_table_lv1.c = outer_ref(outer_table.c)
+        //           TableScan: lhs_inner_table_lv1
+        //     TableScan: outer_table
+
+        // Projection: outer_table.a, outer_table.b, outer_table.c
+        //   Filter: outer_table.a > Int32(1) AND __exists_sq_2.output
+        //     DependentJoin on [] with expr EXISTS (<subquery>) depth 1
+        //       Projection: outer_table.a, outer_table.b, outer_table.c
+        //         Filter: outer_table.a > Int32(1) AND __in_sq_1.output
+        //           DependentJoin on [outer_table.c lvl 2] with expr outer_table.a IN (<subquery>) depth 2
+        //             TableScan: outer_table
+        //             Projection: lhs_inner_table_lv1.a
+        //               Filter: lhs_inner_table_lv1.c = outer_ref(outer_table.c)
+        //                 TableScan: lhs_inner_table_lv1
+        //       Filter: rhs_inner_table_lv1.b = Int32(1)
+        //         TableScan: rhs_inner_table_lv1
+
+        assert_decorrelate!(plan, @r"
+        Projection: outer_table.a, outer_table.b, outer_table.c [a:UInt32, b:UInt32, c:UInt32]
+          Filter: outer_table.a > Int32(1) AND __exists_sq_2.output [a:UInt32, b:UInt32, c:UInt32, __exists_sq_2.output:Boolean]
+            Projection: outer_table.a, outer_table.b, outer_table.c, rhs_inner_table_lv1.mark AS __exists_sq_2.output [a:UInt32, b:UInt32, c:UInt32, __exists_sq_2.output:Boolean]
+              LeftMark Join:  Filter: Boolean(true) [a:UInt32, b:UInt32, c:UInt32, mark:Boolean]
+                Projection: outer_table.a, outer_table.b, outer_table.c [a:UInt32, b:UInt32, c:UInt32]
+                  Filter: outer_table.a > Int32(1) AND __in_sq_1.output [a:UInt32, b:UInt32, c:UInt32, __in_sq_1.output:Boolean]
+                    Projection: outer_table.a, outer_table.b, outer_table.c, mark AS __in_sq_1.output [a:UInt32, b:UInt32, c:UInt32, __in_sq_1.output:Boolean]
+                      LeftMark Join:  Filter: outer_table.a = lhs_inner_table_lv1.a AND outer_table.c IS NOT DISTINCT FROM delim_scan_1.outer_table_c [a:UInt32, b:UInt32, c:UInt32, mark:Boolean]
+                        TableScan: outer_table [a:UInt32, b:UInt32, c:UInt32]
+                        Projection: lhs_inner_table_lv1.a, delim_scan_1.outer_table_c [a:UInt32, outer_table_c:UInt32;N]
+                          Filter: lhs_inner_table_lv1.c = delim_scan_1.outer_table_c [a:UInt32, b:UInt32, c:UInt32, outer_table_c:UInt32;N]
+                            Inner Join:  Filter: Boolean(true) [a:UInt32, b:UInt32, c:UInt32, outer_table_c:UInt32;N]
+                              TableScan: lhs_inner_table_lv1 [a:UInt32, b:UInt32, c:UInt32]
+                              SubqueryAlias: delim_scan_1 [outer_table_c:UInt32;N]
+                                DelimGet: outer_table.c [outer_table_c:UInt32;N]
+                Filter: rhs_inner_table_lv1.b = Int32(1) [a:UInt32, b:UInt32, c:UInt32]
+                  TableScan: rhs_inner_table_lv1 [a:UInt32, b:UInt32, c:UInt32]
+        ");
         Ok(())
     }
 
+    #[test]
     fn uncorrelated_subquery_parent_followed_by_correlated_subquery_on_rhs() -> Result<()>
     {
+        let outer_table = test_table_scan_with_name("outer_table")?;
+        let inner_table_lv1 = test_table_scan_with_name("inner_table_lv1")?;
+        let inner_table_lv2 = test_table_scan_with_name("inner_table_lv2")?;
+        let in_sq_level2 = Arc::new(
+            LogicalPlanBuilder::from(inner_table_lv2.clone())
+                .filter(
+                    col("inner_table_lv2.c")
+                        .eq(out_ref_col(ArrowDataType::UInt32, "inner_table_lv1.c")),
+                )?
+                .project(vec![col("inner_table_lv2.a")])?
+                .build()?,
+        );
+        let exist_sq_level1 = Arc::new(
+            LogicalPlanBuilder::from(inner_table_lv1)
+                .filter(
+                    in_subquery(col("inner_table_lv1.a"), in_sq_level2)
+                        .or(col("inner_table_lv1.b").eq(lit(1))),
+                )?
+                .build()?,
+        );
+
+        let plan = LogicalPlanBuilder::from(outer_table.clone())
+            .filter(col("outer_table.a").gt(lit(1)).and(exists(exist_sq_level1)))?
+            .build()?;
+        // Filter: outer_table.a > Int32(1) AND EXISTS (<subquery>)
+        //   Subquery:
+        //     Filter: inner_table_lv1.a IN (<subquery>) OR inner_table_lv1.b = Int32(1)
+        //       Subquery:
+        //         Projection: inner_table_lv2.a
+        //           Filter: inner_table_lv2.c = outer_ref(inner_table_lv1.c)
+        //             TableScan: inner_table_lv2
+        //       TableScan: inner_table_lv1
+        //   TableScan: outer_table
+        assert_decorrelate!(plan, @r"
+        Projection: outer_table.a, outer_table.b, outer_table.c [a:UInt32, b:UInt32, c:UInt32]
+          Filter: outer_table.a > Int32(1) AND __exists_sq_2.output [a:UInt32, b:UInt32, c:UInt32, __exists_sq_2.output:Boolean]
+            Projection: outer_table.a, outer_table.b, outer_table.c, inner_table_lv1.mark AS __exists_sq_2.output [a:UInt32, b:UInt32, c:UInt32, __exists_sq_2.output:Boolean]
+              LeftMark Join:  Filter: Boolean(true) [a:UInt32, b:UInt32, c:UInt32, mark:Boolean]
+                TableScan: outer_table [a:UInt32, b:UInt32, c:UInt32]
+                Projection: inner_table_lv1.a, inner_table_lv1.b, inner_table_lv1.c [a:UInt32, b:UInt32, c:UInt32]
+                  Filter: __in_sq_1.output OR inner_table_lv1.b = Int32(1) [a:UInt32, b:UInt32, c:UInt32, __in_sq_1.output:Boolean]
+                    Projection: inner_table_lv1.a, inner_table_lv1.b, inner_table_lv1.c, mark AS __in_sq_1.output [a:UInt32, b:UInt32, c:UInt32, __in_sq_1.output:Boolean]
+                      LeftMark Join:  Filter: inner_table_lv1.a = inner_table_lv2.a AND inner_table_lv1.c IS NOT DISTINCT FROM delim_scan_1.inner_table_lv1_c [a:UInt32, b:UInt32, c:UInt32, mark:Boolean]
+                        TableScan: inner_table_lv1 [a:UInt32, b:UInt32, c:UInt32]
+                        Projection: inner_table_lv2.a, delim_scan_1.inner_table_lv1_c [a:UInt32, inner_table_lv1_c:UInt32;N]
+                          Filter: inner_table_lv2.c = delim_scan_1.inner_table_lv1_c [a:UInt32, b:UInt32, c:UInt32, inner_table_lv1_c:UInt32;N]
+                            Inner Join:  Filter: Boolean(true) [a:UInt32, b:UInt32, c:UInt32, inner_table_lv1_c:UInt32;N]
+                              TableScan: inner_table_lv2 [a:UInt32, b:UInt32, c:UInt32]
+                              SubqueryAlias: delim_scan_1 [inner_table_lv1_c:UInt32;N]
+                                DelimGet: inner_table_lv1.c [inner_table_lv1_c:UInt32;N]
+        ");
         Ok(())
     }
     #[test]
