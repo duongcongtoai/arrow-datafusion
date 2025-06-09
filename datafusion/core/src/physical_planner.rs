@@ -895,274 +895,8 @@ impl DefaultPhysicalPlanner {
             }
 
             // 2 Children
-            LogicalPlan::Join(Join {
-                left,
-                right,
-                on: keys,
-                filter,
-                join_type,
-                null_equals_null,
-                schema: join_schema,
-                ..
-            }) => {
-                let null_equals_null = *null_equals_null;
-
-                let [physical_left, physical_right] = children.two()?;
-
-                // If join has expression equijoin keys, add physical projection.
-                let has_expr_join_key = keys.iter().any(|(l, r)| {
-                    !(matches!(l, Expr::Column(_)) && matches!(r, Expr::Column(_)))
-                });
-                let (new_logical, physical_left, physical_right) = if has_expr_join_key {
-                    // TODO: Can we extract this transformation to somewhere before physical plan
-                    //       creation?
-                    let (left_keys, right_keys): (Vec<_>, Vec<_>) =
-                        keys.iter().cloned().unzip();
-
-                    let (left, left_col_keys, left_projected) =
-                        wrap_projection_for_join_if_necessary(
-                            &left_keys,
-                            left.as_ref().clone(),
-                        )?;
-                    let (right, right_col_keys, right_projected) =
-                        wrap_projection_for_join_if_necessary(
-                            &right_keys,
-                            right.as_ref().clone(),
-                        )?;
-                    let column_on = (left_col_keys, right_col_keys);
-
-                    let left = Arc::new(left);
-                    let right = Arc::new(right);
-                    let new_join = LogicalPlan::Join(Join::try_new_with_project_input(
-                        node,
-                        Arc::clone(&left),
-                        Arc::clone(&right),
-                        column_on,
-                    )?);
-
-                    // If inputs were projected then create ExecutionPlan for these new
-                    // LogicalPlan nodes.
-                    let physical_left = match (left_projected, left.as_ref()) {
-                        // If left_projected is true we are guaranteed that left is a Projection
-                        (
-                            true,
-                            LogicalPlan::Projection(Projection { input, expr, .. }),
-                        ) => self.create_project_physical_exec(
-                            session_state,
-                            physical_left,
-                            input,
-                            expr,
-                        )?,
-                        _ => physical_left,
-                    };
-                    let physical_right = match (right_projected, right.as_ref()) {
-                        // If right_projected is true we are guaranteed that right is a Projection
-                        (
-                            true,
-                            LogicalPlan::Projection(Projection { input, expr, .. }),
-                        ) => self.create_project_physical_exec(
-                            session_state,
-                            physical_right,
-                            input,
-                            expr,
-                        )?,
-                        _ => physical_right,
-                    };
-
-                    // Remove temporary projected columns
-                    if left_projected || right_projected {
-                        let final_join_result =
-                            join_schema.iter().map(Expr::from).collect::<Vec<_>>();
-                        let projection = LogicalPlan::Projection(Projection::try_new(
-                            final_join_result,
-                            Arc::new(new_join),
-                        )?);
-                        // LogicalPlan mutated
-                        (Cow::Owned(projection), physical_left, physical_right)
-                    } else {
-                        // LogicalPlan mutated
-                        (Cow::Owned(new_join), physical_left, physical_right)
-                    }
-                } else {
-                    // LogicalPlan unchanged
-                    (Cow::Borrowed(node), physical_left, physical_right)
-                };
-
-                // Retrieving new left/right and join keys (in case plan was mutated above)
-                let (left, right, keys, new_project) = match new_logical.as_ref() {
-                    LogicalPlan::Projection(Projection { input, expr, .. }) => {
-                        if let LogicalPlan::Join(Join {
-                            left, right, on, ..
-                        }) = input.as_ref()
-                        {
-                            (left, right, on, Some((input, expr)))
-                        } else {
-                            unreachable!()
-                        }
-                    }
-                    LogicalPlan::Join(Join {
-                        left, right, on, ..
-                    }) => (left, right, on, None),
-                    // Should either be the original Join, or Join with a Projection on top
-                    _ => unreachable!(),
-                };
-
-                // All equi-join keys are columns now, create physical join plan
-                let left_df_schema = left.schema();
-                let right_df_schema = right.schema();
-                let execution_props = session_state.execution_props();
-                let join_on = keys
-                    .iter()
-                    .map(|(l, r)| {
-                        let l = create_physical_expr(l, left_df_schema, execution_props)?;
-                        let r =
-                            create_physical_expr(r, right_df_schema, execution_props)?;
-                        Ok((l, r))
-                    })
-                    .collect::<Result<join_utils::JoinOn>>()?;
-
-                let join_filter = match filter {
-                    Some(expr) => {
-                        // Extract columns from filter expression and saved in a HashSet
-                        let cols = expr.column_refs();
-
-                        // Collect left & right field indices, the field indices are sorted in ascending order
-                        let left_field_indices = cols
-                            .iter()
-                            .filter_map(|c| left_df_schema.index_of_column(c).ok())
-                            .sorted()
-                            .collect::<Vec<_>>();
-                        let right_field_indices = cols
-                            .iter()
-                            .filter_map(|c| right_df_schema.index_of_column(c).ok())
-                            .sorted()
-                            .collect::<Vec<_>>();
-
-                        // Collect DFFields and Fields required for intermediate schemas
-                        let (filter_df_fields, filter_fields): (Vec<_>, Vec<_>) =
-                            left_field_indices
-                                .clone()
-                                .into_iter()
-                                .map(|i| {
-                                    (
-                                        left_df_schema.qualified_field(i),
-                                        physical_left.schema().field(i).clone(),
-                                    )
-                                })
-                                .chain(right_field_indices.clone().into_iter().map(|i| {
-                                    (
-                                        right_df_schema.qualified_field(i),
-                                        physical_right.schema().field(i).clone(),
-                                    )
-                                }))
-                                .unzip();
-                        let filter_df_fields = filter_df_fields
-                            .into_iter()
-                            .map(|(qualifier, field)| {
-                                (qualifier.cloned(), Arc::new(field.clone()))
-                            })
-                            .collect();
-
-                        let metadata: HashMap<_, _> = left_df_schema
-                            .metadata()
-                            .clone()
-                            .into_iter()
-                            .chain(right_df_schema.metadata().clone())
-                            .collect();
-
-                        // Construct intermediate schemas used for filtering data and
-                        // convert logical expression to physical according to filter schema
-                        let filter_df_schema = DFSchema::new_with_metadata(
-                            filter_df_fields,
-                            metadata.clone(),
-                        )?;
-                        let filter_schema =
-                            Schema::new_with_metadata(filter_fields, metadata);
-                        let filter_expr = create_physical_expr(
-                            expr,
-                            &filter_df_schema,
-                            session_state.execution_props(),
-                        )?;
-                        let column_indices = join_utils::JoinFilter::build_column_indices(
-                            left_field_indices,
-                            right_field_indices,
-                        );
-
-                        Some(join_utils::JoinFilter::new(
-                            filter_expr,
-                            column_indices,
-                            Arc::new(filter_schema),
-                        ))
-                    }
-                    _ => None,
-                };
-
-                let prefer_hash_join =
-                    session_state.config_options().optimizer.prefer_hash_join;
-
-                let join: Arc<dyn ExecutionPlan> = if join_on.is_empty() {
-                    if join_filter.is_none() && matches!(join_type, JoinType::Inner) {
-                        // cross join if there is no join conditions and no join filter set
-                        Arc::new(CrossJoinExec::new(physical_left, physical_right))
-                    } else {
-                        // there is no equal join condition, use the nested loop join
-                        Arc::new(NestedLoopJoinExec::try_new(
-                            physical_left,
-                            physical_right,
-                            join_filter,
-                            join_type,
-                            None,
-                        )?)
-                    }
-                } else if session_state.config().target_partitions() > 1
-                    && session_state.config().repartition_joins()
-                    && !prefer_hash_join
-                {
-                    // Use SortMergeJoin if hash join is not preferred
-                    let join_on_len = join_on.len();
-                    Arc::new(SortMergeJoinExec::try_new(
-                        physical_left,
-                        physical_right,
-                        join_on,
-                        join_filter,
-                        *join_type,
-                        vec![SortOptions::default(); join_on_len],
-                        null_equals_null,
-                    )?)
-                } else if session_state.config().target_partitions() > 1
-                    && session_state.config().repartition_joins()
-                    && prefer_hash_join
-                {
-                    Arc::new(HashJoinExec::try_new(
-                        physical_left,
-                        physical_right,
-                        join_on,
-                        join_filter,
-                        join_type,
-                        None,
-                        PartitionMode::Auto,
-                        null_equals_null,
-                    )?)
-                } else {
-                    Arc::new(HashJoinExec::try_new(
-                        physical_left,
-                        physical_right,
-                        join_on,
-                        join_filter,
-                        join_type,
-                        None,
-                        PartitionMode::CollectLeft,
-                        null_equals_null,
-                    )?)
-                };
-
-                // If plan was mutated previously then need to create the ExecutionPlan
-                // for the new Projection that was applied on top.
-                if let Some((input, expr)) = new_project {
-                    self.create_project_physical_exec(session_state, join, input, expr)?
-                } else {
-                    join
-                }
+            LogicalPlan::Join(join) => {
+                self.create_join_physical_exec(session_state, join, children, node)?
             }
             LogicalPlan::RecursiveQuery(RecursiveQuery {
                 name, is_distinct, ..
@@ -1216,6 +950,9 @@ impl DefaultPhysicalPlanner {
                     plan
                 }
             }
+            LogicalPlan::DelimGet(_) => {
+                return internal_err!("Optimizors have not completely remove delim get")
+            }
 
             // Other
             LogicalPlan::Statement(statement) => {
@@ -1254,9 +991,6 @@ impl DefaultPhysicalPlanner {
                 return internal_err!(
                     "Optimizors have not completely remove dependent join"
                 )
-            }
-            LogicalPlan::DelimGet(_) => {
-                return internal_err!("Optimizors have not completely remove delim get")
             }
         };
         Ok(exec_node)
@@ -2058,6 +1792,271 @@ impl DefaultPhysicalPlanner {
             physical_exprs,
             input_exec,
         )?))
+    }
+
+    fn create_join_physical_exec(
+        &self,
+        session_state: &SessionState,
+        join: &Join,
+        children: ChildrenContainer,
+        node: &LogicalPlan,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let Join {
+            left,
+            right,
+            on: keys,
+            filter,
+            join_type,
+            schema: join_schema,
+            null_equals_null,
+            ..
+        } = join;
+
+        let null_equals_null = *null_equals_null;
+
+        let [physical_left, physical_right] = children.two()?;
+
+        // If join has expression equijoin keys, add physical projection.
+        let has_expr_join_key = keys.iter().any(|(l, r)| {
+            !(matches!(l, Expr::Column(_)) && matches!(r, Expr::Column(_)))
+        });
+        let (new_logical, physical_left, physical_right) = if has_expr_join_key {
+            // TODO: Can we extract this transformation to somewhere before physical plan
+            //       creation?
+            let (left_keys, right_keys): (Vec<_>, Vec<_>) = keys.iter().cloned().unzip();
+
+            let (left, left_col_keys, left_projected) =
+                wrap_projection_for_join_if_necessary(&left_keys, left.as_ref().clone())?;
+            let (right, right_col_keys, right_projected) =
+                wrap_projection_for_join_if_necessary(
+                    &right_keys,
+                    right.as_ref().clone(),
+                )?;
+            let column_on = (left_col_keys, right_col_keys);
+
+            let left = Arc::new(left);
+            let right = Arc::new(right);
+            let new_join = LogicalPlan::Join(Join::try_new_with_project_input(
+                node,
+                Arc::clone(&left),
+                Arc::clone(&right),
+                column_on,
+            )?);
+
+            // If inputs were projected then create ExecutionPlan for these new
+            // LogicalPlan nodes.
+            let physical_left = match (left_projected, left.as_ref()) {
+                // If left_projected is true we are guaranteed that left is a Projection
+                (true, LogicalPlan::Projection(Projection { input, expr, .. })) => self
+                    .create_project_physical_exec(
+                    session_state,
+                    physical_left,
+                    input,
+                    expr,
+                )?,
+                _ => physical_left,
+            };
+            let physical_right = match (right_projected, right.as_ref()) {
+                // If right_projected is true we are guaranteed that right is a Projection
+                (true, LogicalPlan::Projection(Projection { input, expr, .. })) => self
+                    .create_project_physical_exec(
+                    session_state,
+                    physical_right,
+                    input,
+                    expr,
+                )?,
+                _ => physical_right,
+            };
+
+            // Remove temporary projected columns
+            if left_projected || right_projected {
+                let final_join_result =
+                    join_schema.iter().map(Expr::from).collect::<Vec<_>>();
+                let projection = LogicalPlan::Projection(Projection::try_new(
+                    final_join_result,
+                    Arc::new(new_join),
+                )?);
+                // LogicalPlan mutated
+                (Cow::Owned(projection), physical_left, physical_right)
+            } else {
+                // LogicalPlan mutated
+                (Cow::Owned(new_join), physical_left, physical_right)
+            }
+        } else {
+            // LogicalPlan unchanged
+            (Cow::Borrowed(node), physical_left, physical_right)
+        };
+
+        // Retrieving new left/right and join keys (in case plan was mutated above)
+        let (left, right, keys, new_project) = match new_logical.as_ref() {
+            LogicalPlan::Projection(Projection { input, expr, .. }) => {
+                if let LogicalPlan::Join(Join {
+                    left, right, on, ..
+                }) = input.as_ref()
+                {
+                    (left, right, on, Some((input, expr)))
+                } else {
+                    unreachable!()
+                }
+            }
+            LogicalPlan::Join(Join {
+                left, right, on, ..
+            }) => (left, right, on, None),
+            // Should either be the original Join, or Join with a Projection on top
+            _ => unreachable!(),
+        };
+
+        // All equi-join keys are columns now, create physical join plan
+        let left_df_schema = left.schema();
+        let right_df_schema = right.schema();
+        let execution_props = session_state.execution_props();
+        let join_on = keys
+            .iter()
+            .map(|(l, r)| {
+                let l = create_physical_expr(l, left_df_schema, execution_props)?;
+                let r = create_physical_expr(r, right_df_schema, execution_props)?;
+                Ok((l, r))
+            })
+            .collect::<Result<join_utils::JoinOn>>()?;
+
+        let join_filter = match filter {
+            Some(expr) => {
+                // Extract columns from filter expression and saved in a HashSet
+                let cols = expr.column_refs();
+
+                // Collect left & right field indices, the field indices are sorted in ascending order
+                let left_field_indices = cols
+                    .iter()
+                    .filter_map(|c| left_df_schema.index_of_column(c).ok())
+                    .sorted()
+                    .collect::<Vec<_>>();
+                let right_field_indices = cols
+                    .iter()
+                    .filter_map(|c| right_df_schema.index_of_column(c).ok())
+                    .sorted()
+                    .collect::<Vec<_>>();
+
+                // Collect DFFields and Fields required for intermediate schemas
+                let (filter_df_fields, filter_fields): (Vec<_>, Vec<_>) =
+                    left_field_indices
+                        .clone()
+                        .into_iter()
+                        .map(|i| {
+                            (
+                                left_df_schema.qualified_field(i),
+                                physical_left.schema().field(i).clone(),
+                            )
+                        })
+                        .chain(right_field_indices.clone().into_iter().map(|i| {
+                            (
+                                right_df_schema.qualified_field(i),
+                                physical_right.schema().field(i).clone(),
+                            )
+                        }))
+                        .unzip();
+                let filter_df_fields = filter_df_fields
+                    .into_iter()
+                    .map(|(qualifier, field)| {
+                        (qualifier.cloned(), Arc::new(field.clone()))
+                    })
+                    .collect();
+
+                let metadata: HashMap<_, _> = left_df_schema
+                    .metadata()
+                    .clone()
+                    .into_iter()
+                    .chain(right_df_schema.metadata().clone())
+                    .collect();
+
+                // Construct intermediate schemas used for filtering data and
+                // convert logical expression to physical according to filter schema
+                let filter_df_schema =
+                    DFSchema::new_with_metadata(filter_df_fields, metadata.clone())?;
+                let filter_schema = Schema::new_with_metadata(filter_fields, metadata);
+                let filter_expr = create_physical_expr(
+                    expr,
+                    &filter_df_schema,
+                    session_state.execution_props(),
+                )?;
+                let column_indices = join_utils::JoinFilter::build_column_indices(
+                    left_field_indices,
+                    right_field_indices,
+                );
+
+                Some(join_utils::JoinFilter::new(
+                    filter_expr,
+                    column_indices,
+                    Arc::new(filter_schema),
+                ))
+            }
+            _ => None,
+        };
+
+        let prefer_hash_join = session_state.config_options().optimizer.prefer_hash_join;
+
+        let join: Arc<dyn ExecutionPlan> = if join_on.is_empty() {
+            if join_filter.is_none() && matches!(join_type, JoinType::Inner) {
+                // cross join if there is no join conditions and no join filter set
+                Arc::new(CrossJoinExec::new(physical_left, physical_right))
+            } else {
+                // there is no equal join condition, use the nested loop join
+                Arc::new(NestedLoopJoinExec::try_new(
+                    physical_left,
+                    physical_right,
+                    join_filter,
+                    join_type,
+                    None,
+                )?)
+            }
+        } else if session_state.config().target_partitions() > 1
+            && session_state.config().repartition_joins()
+            && !prefer_hash_join
+        {
+            // Use SortMergeJoin if hash join is not preferred
+            let join_on_len = join_on.len();
+            Arc::new(SortMergeJoinExec::try_new(
+                physical_left,
+                physical_right,
+                join_on,
+                join_filter,
+                *join_type,
+                vec![SortOptions::default(); join_on_len],
+                null_equals_null,
+            )?)
+        } else if session_state.config().target_partitions() > 1
+            && session_state.config().repartition_joins()
+            && prefer_hash_join
+        {
+            Arc::new(HashJoinExec::try_new(
+                physical_left,
+                physical_right,
+                join_on,
+                join_filter,
+                join_type,
+                None,
+                PartitionMode::Auto,
+                null_equals_null,
+            )?)
+        } else {
+            Arc::new(HashJoinExec::try_new(
+                physical_left,
+                physical_right,
+                join_on,
+                join_filter,
+                join_type,
+                None,
+                PartitionMode::CollectLeft,
+                null_equals_null,
+            )?)
+        };
+
+        // If plan was mutated previously then need to create the ExecutionPlan
+        // for the new Projection that was applied on top.
+        if let Some((input, expr)) = new_project {
+            Ok(self.create_project_physical_exec(session_state, join, input, expr)?)
+        } else {
+            Ok(join)
+        }
     }
 }
 

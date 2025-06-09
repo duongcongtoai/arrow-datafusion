@@ -860,17 +860,9 @@ impl DependentJoinDecorrelator {
                 Self::rewrite_expr_from_replacement_map(&self.replacement_map, new_plan)?;
         }
 
-        // let projected_expr = new_plan.schema().columns().into_iter().map(|c| {
-        //     if let Some(alt_expr) = self.replacement_map.swap_remove(&c.name) {
-        //         return alt_expr;
-        //     }
-        //     Expr::Column(c.clone())
-        // });
-        // new_plan = LogicalPlanBuilder::new(new_plan)
-        //     .project(projected_expr)?
-        //     .build()?;
         Ok(new_plan)
     }
+
     fn decorrelate_plan(&mut self, node: LogicalPlan) -> Result<LogicalPlan> {
         match node {
             LogicalPlan::DependentJoin(mut djoin) => {
@@ -910,14 +902,15 @@ impl OptimizerRule for DecorrelateDependentJoin {
     ) -> Result<Transformed<LogicalPlan>> {
         let mut transformer =
             DependentJoinRewriter::new(Arc::clone(config.alias_generator()));
-        let rewrite_result = transformer.rewrite_subqueries_into_dependent_joins(plan)?;
+        let mut rewrite_result = transformer.rewrite_subqueries_into_dependent_joins(plan)?;
         if rewrite_result.transformed {
-            println!("dependent join plan {}", rewrite_result.data);
+            println!("dependent join plan:\n {}", rewrite_result.data);
             let mut decorrelator = DependentJoinDecorrelator::new_root();
-            return Ok(Transformed::yes(
-                decorrelator.decorrelate_plan(rewrite_result.data)?,
-            ));
+            rewrite_result = Transformed::yes(decorrelator.decorrelate_plan(rewrite_result.data)?);
+            println!("\ndecorrelate join plan:\n {}", rewrite_result.data);
+            return Ok(rewrite_result);
         }
+
         Ok(rewrite_result)
     }
 
