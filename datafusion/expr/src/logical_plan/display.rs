@@ -651,7 +651,7 @@ impl<'a, 'b> PgJsonVisitor<'a, 'b> {
                     "StructColumn": expr_vec_fmt!(struct_type_columns),
                 })
             }
-            LogicalPlan::DelimGet(_) => todo!(),
+            LogicalPlan::DelimScan(_) => todo!(),
         }
     }
 }

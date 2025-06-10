@@ -31,7 +31,7 @@ use crate::expr_rewriter::{
     rewrite_sort_cols_by_aggs,
 };
 use crate::logical_plan::{
-    Aggregate, Analyze, DelimGet, DependentJoin, Distinct, DistinctOn, EmptyRelation,
+    Aggregate, Analyze, DelimScan, DependentJoin, Distinct, DistinctOn, EmptyRelation,
     Explain, Filter, Join, JoinConstraint, JoinType, Limit, LogicalPlan, Partitioning,
     PlanType, Prepare, Projection, Repartition, Sort, SubqueryAlias, TableScan, Union,
     Unnest, Values, Window,
@@ -398,13 +398,13 @@ impl LogicalPlanBuilder {
         Self::scan_with_filters(table_name, table_source, projection, vec![])
     }
 
-    pub fn delim_get(
+    pub fn delim_scan(
         table_index: usize,
         delim_types: &Vec<DataType>,
         columns: Vec<Column>,
         schema: DFSchemaRef,
     ) -> Self {
-        Self::new(LogicalPlan::DelimGet(DelimGet::try_new(
+        Self::new(LogicalPlan::DelimScan(DelimScan::try_new(
             table_index,
             columns,
             delim_types,
