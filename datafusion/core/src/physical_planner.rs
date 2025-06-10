@@ -896,7 +896,23 @@ impl DefaultPhysicalPlanner {
 
             // 2 Children
             LogicalPlan::Join(join) => {
-                self.create_join_physical_exec(session_state, join, children, node)?
+                if contains_delim_scan(node) {
+                    // First create the underlying join.
+                    let comparison_join = self.create_join_physical_exec(
+                        session_state,
+                        join,
+                        children,
+                        node,
+                    )?;
+
+                    // Duplicate eliminated join.
+                    // First gather the scans on the duplicate eliminated data set from the delim
+                    // side.
+                    // TODO: construct delim join
+                    comparison_join
+                } else {
+                    self.create_join_physical_exec(session_state, join, children, node)?
+                }
             }
             LogicalPlan::RecursiveQuery(RecursiveQuery {
                 name, is_distinct, ..
@@ -950,7 +966,7 @@ impl DefaultPhysicalPlanner {
                     plan
                 }
             }
-            LogicalPlan::DelimGet(_) => {
+            LogicalPlan::DelimScan(_) => {
                 return internal_err!("Optimizors have not completely remove delim get")
             }
 
@@ -2068,6 +2084,13 @@ fn tuple_err<T, R>(value: (Result<T>, Result<R>)) -> Result<(T, R)> {
         (Err(e), Err(_)) => Err(e),
     }
 }
+
+fn contains_delim_scan(plan: &LogicalPlan) -> bool {
+    plan.exists(|plan| Ok(matches!(plan, LogicalPlan::DelimScan(_))))
+        .expect("Inner is always Ok")
+}
+
+// fn gather_delim_scans()
 
 // Handle the case where the name of a physical column expression does not match the corresponding physical input fields names.
 // Physical column names are derived from the physical schema, whereas physical column expressions are derived from the logical column names.

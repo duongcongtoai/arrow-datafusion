@@ -566,7 +566,7 @@ impl OptimizerRule for CommonSubexprEliminate {
             | LogicalPlan::Unnest(_)
             | LogicalPlan::RecursiveQuery(_)
             | LogicalPlan::DependentJoin(_)
-            | LogicalPlan::DelimGet(_) => {
+            | LogicalPlan::DelimScan(_) => {
                 // This rule handles recursion itself in a `ApplyOrder::TopDown` like
                 // manner.
                 plan.map_children(|c| self.rewrite(c, config))?

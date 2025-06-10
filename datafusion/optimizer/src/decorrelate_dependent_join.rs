@@ -547,7 +547,7 @@ impl DependentJoinDecorrelator {
             .collect();
         let schema = DFSchema::from_unqualified_fields(fields, StdHashMap::new())?;
         Ok((
-            LogicalPlanBuilder::delim_get(
+            LogicalPlanBuilder::delim_scan(
                 self.delim_scan_id,
                 &self.delim_types,
                 self.domains

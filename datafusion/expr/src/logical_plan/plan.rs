@@ -290,11 +290,11 @@ pub enum LogicalPlan {
     /// A node type that only exist during subquery decorrelation
     /// TODO: maybe we can avoid creating new type of LogicalPlan for this usecase
     DependentJoin(DependentJoin),
-    DelimGet(DelimGet),
+    DelimScan(DelimScan),
 }
 
 #[derive(Debug, Clone, Eq, Hash)]
-pub struct DelimGet {
+pub struct DelimScan {
     /// The schema description of the output
     pub projected_schema: DFSchemaRef,
     pub columns: Vec<Column>,
@@ -302,7 +302,7 @@ pub struct DelimGet {
     pub delim_types: Vec<DataType>,
 }
 
-impl DelimGet {
+impl DelimScan {
     pub fn try_new(
         table_index: usize,
         columns: Vec<Column>,
@@ -318,13 +318,13 @@ impl DelimGet {
     }
 }
 
-impl PartialEq for DelimGet {
+impl PartialEq for DelimScan {
     fn eq(&self, other: &Self) -> bool {
         self.table_index == other.table_index && self.delim_types == other.delim_types
     }
 }
 
-impl PartialOrd for DelimGet {
+impl PartialOrd for DelimScan {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match self.table_index.partial_cmp(&other.table_index) {
             Some(Ordering::Equal) => self.delim_types.partial_cmp(&other.delim_types),
@@ -486,7 +486,7 @@ impl LogicalPlan {
                 // we take the schema of the static term as the schema of the entire recursive query
                 static_term.schema()
             }
-            LogicalPlan::DelimGet(DelimGet {
+            LogicalPlan::DelimScan(DelimScan {
                 projected_schema, ..
             }) => projected_schema,
         }
@@ -620,7 +620,7 @@ impl LogicalPlan {
             | LogicalPlan::EmptyRelation { .. }
             | LogicalPlan::Values { .. }
             | LogicalPlan::DescribeTable(_)
-            | LogicalPlan::DelimGet(_) => vec![],
+            | LogicalPlan::DelimScan(_) => vec![],
         }
     }
 
@@ -733,7 +733,7 @@ impl LogicalPlan {
             | LogicalPlan::Ddl(_)
             | LogicalPlan::DescribeTable(_)
             | LogicalPlan::Unnest(_) => Ok(None),
-            LogicalPlan::DelimGet(_) => todo!(),
+            LogicalPlan::DelimScan(_) => todo!(),
         }
     }
 
@@ -891,7 +891,7 @@ impl LogicalPlan {
                 // Update schema with unnested column type.
                 unnest_with_options(Arc::unwrap_or_clone(input), exec_columns, options)
             }
-            LogicalPlan::DelimGet(_) => todo!(),
+            LogicalPlan::DelimScan(_) => todo!(),
         }
     }
 
@@ -1285,7 +1285,7 @@ impl LogicalPlan {
                 Ok(new_plan)
             }
             LogicalPlan::DependentJoin(_) => todo!(),
-            LogicalPlan::DelimGet(_) => todo!(),
+            LogicalPlan::DelimScan(_) => todo!(),
         }
     }
 
@@ -1520,7 +1520,7 @@ impl LogicalPlan {
             | LogicalPlan::DescribeTable(_)
             | LogicalPlan::Statement(_)
             | LogicalPlan::Extension(_) => None,
-            LogicalPlan::DelimGet(_) => todo!(),
+            LogicalPlan::DelimScan(_) => todo!(),
         }
     }
 
@@ -1964,7 +1964,7 @@ impl LogicalPlan {
 
                         Ok(())
                     }
-                    LogicalPlan::DelimGet(DelimGet{columns,..}) => {
+                    LogicalPlan::DelimScan(DelimScan{columns,..}) => {
                         write!(f, "DelimGet:")?; // TODO
                         for (i, expr_item) in columns.iter().enumerate() {
                             if i > 0 {

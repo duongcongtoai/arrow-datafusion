@@ -77,7 +77,7 @@ pub fn to_substrait_rel(
         LogicalPlan::DependentJoin(join) => {
             not_impl_err!("Unsupported plan type: {join:?}")?
         }
-        LogicalPlan::DelimGet(delim_get) => {
+        LogicalPlan::DelimScan(delim_get) => {
             not_impl_err!("Unsupported plan type: {delim_get:?}")?
         }
     }

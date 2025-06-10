@@ -1807,7 +1807,7 @@ impl AsLogicalPlan for LogicalPlanNode {
             LogicalPlan::DependentJoin(_) => Err(proto_error(
                 "LogicalPlan serde is not implemented for DependentJoin",
             )),
-            LogicalPlan::DelimGet(_) => Err(proto_error(
+            LogicalPlan::DelimScan(_) => Err(proto_error(
                 "LogicalPlan serde is not implemented for DelimGet",
             )),
         }
