@@ -17,23 +17,20 @@
 
 //! [`DependentJoinRewriter`] converts correlated subqueries to `DependentJoin`
 
-use std::ops::Deref;
-use std::sync::Arc;
-use std::collections::HashMap as StdHashMap;
 use crate::rewrite_dependent_join::DependentJoinRewriter;
 use crate::{ApplyOrder, OptimizerConfig, OptimizerRule};
+use std::collections::HashMap as StdHashMap;
+use std::ops::Deref;
+use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field};
-use datafusion_common::tree_node::{
-    Transformed, TreeNode, TreeNodeRecursion, 
-};
-use datafusion_common::{internal_err, Column, DFSchema,  Result};
-use datafusion_expr::expr::{self, Exists, InSubquery};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
+use datafusion_common::{internal_err, Column, DFSchema, Result};
+use datafusion_expr::expr::{self, CorrelatedColumnInfo, Exists, InSubquery};
 use datafusion_expr::utils::conjunction;
 use datafusion_expr::{
-    binary_expr,  col,  lit, not, when, Aggregate, BinaryExpr,
-    DependentJoin,  Expr,   JoinType, LogicalPlan,
-    LogicalPlanBuilder, Operator, Projection,
+    binary_expr, col, lit, not, when, Aggregate, BinaryExpr, DependentJoin, Expr,
+    JoinType, LogicalPlan, LogicalPlanBuilder, Operator, Projection,
 };
 
 use indexmap::{IndexMap, IndexSet};
@@ -54,11 +51,6 @@ struct Unnesting {
     info: Arc<UnnestingInfo>,
 }
 
-#[derive(Clone, Debug, Eq, PartialOrd, PartialEq, Hash)]
-struct CorrelatedColumnInfo {
-    col: Column,
-    data_type: DataType,
-}
 #[derive(Clone, Debug)]
 pub struct DependentJoinDecorrelator {
     // immutable, defined when this object is constructed
@@ -68,6 +60,7 @@ pub struct DependentJoinDecorrelator {
 
     // top-most subquery DecorrelateDependentJoin has depth 1 and so on
     depth: usize,
+    correlated_columns: Vec<CorrelatedColumnInfo>,
     // hashmap of correlated column by depth
     correlated_map: IndexMap<usize, Vec<CorrelatedColumnInfo>>,
     // check if we have to replace any COUNT aggregates into "CASE WHEN X IS NULL THEN 0 ELSE COUNT END"
@@ -160,6 +153,7 @@ impl DependentJoinDecorrelator {
             domains: IndexSet::new(),
             delim_types: vec![],
             is_initial: true,
+            correlated_columns: vec![],
             correlated_map: IndexMap::new(),
             replacement_map: IndexMap::new(),
             any_join: true,
@@ -216,10 +210,19 @@ impl DependentJoinDecorrelator {
                 }
             });
 
+        let correlated_columns: Vec<_> = correlated_columns
+            .iter()
+            .map(|(_, col, data_type)| CorrelatedColumnInfo {
+                col: col.clone(),
+                data_type: data_type.clone(),
+            })
+            .collect();
+
         Self {
             domains,
             delim_types,
             is_initial,
+            correlated_columns,
             correlated_map: merged_correlated_map,
             replacement_map: IndexMap::new(),
             any_join,
@@ -607,6 +610,7 @@ impl DependentJoinDecorrelator {
         // TODO: this lookup must be associated with a list of correlated_columns
         // (from current DecorrelateDependentJoin context and its parent)
         // and check if the correlated expr (if any) exists in the correlated_columns
+        // TODO: take lateral_depth into consideration
         node.apply(|p| {
             match p {
                 LogicalPlan::DependentJoin(join) => {
@@ -616,7 +620,7 @@ impl DependentJoinDecorrelator {
                     }
                 }
                 any => {
-                    if any.contains_outer_reference() {
+                    if any.contains_specific_outer_reference(&self.correlated_columns) {
                         *has_correlated_expr_ref = true;
                         return Ok(TreeNodeRecursion::Stop);
                     }
@@ -941,15 +945,16 @@ mod tests {
         OptimizerContext, OptimizerRule,
     };
     use arrow::datatypes::DataType as ArrowDataType;
-    use datafusion_common:: Result;
+    use datafusion_common::Result;
     use datafusion_expr::{
-         exists,  expr_fn::col, in_subquery, lit,
-        out_ref_col, scalar_subquery, Expr,  LogicalPlan, LogicalPlanBuilder,
+        exists, expr_fn::col, in_subquery, lit, out_ref_col, scalar_subquery, Expr,
+        LogicalPlan, LogicalPlanBuilder,
     };
     use datafusion_functions_aggregate::count::count;
     use std::sync::Arc;
     fn print_graphviz(plan: &LogicalPlan) {
-        let rule: Arc<dyn OptimizerRule + Send + Sync> = Arc::new(DecorrelateDependentJoin::new());
+        let rule: Arc<dyn OptimizerRule + Send + Sync> =
+            Arc::new(DecorrelateDependentJoin::new());
         let optimizer = Optimizer::with_rules(vec![rule]);
         let optimized_plan = optimizer
             .optimize(plan.clone(), &OptimizerContext::new(), |_, _| {})

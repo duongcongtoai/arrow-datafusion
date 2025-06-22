@@ -362,9 +362,16 @@ pub enum Expr {
     Placeholder(Placeholder),
     /// A placeholder which holds a reference to a qualified field
     /// in the outer query, used for correlated sub queries.
+    /// TODO: replace with CorrelatedColumnInfo.
     OuterReferenceColumn(DataType, Column),
     /// Unnest expression
     Unnest(Unnest),
+}
+
+#[derive(Clone, Debug, Eq, PartialOrd, PartialEq, Hash)]
+pub struct CorrelatedColumnInfo {
+    pub col: Column,
+    pub data_type: DataType,
 }
 
 impl Default for Expr {
@@ -1753,6 +1760,25 @@ impl Expr {
     pub fn contains_outer(&self) -> bool {
         self.exists(|expr| Ok(matches!(expr, Expr::OuterReferenceColumn { .. })))
             .expect("exists closure is infallible")
+    }
+
+    /// Return true if the expression contains out reference(correlated) expressions.
+    pub fn contains_specific_outer(
+        &self,
+        outer_refs: &Vec<CorrelatedColumnInfo>,
+    ) -> bool {
+        self.exists(|expr| {
+            for outer_ref in outer_refs {
+                if let Expr::OuterReferenceColumn(data_type, column) = expr {
+                    if outer_ref.data_type == *data_type && outer_ref.col == *column {
+                        return Ok(true);
+                    }
+                }
+            }
+
+            Ok(false)
+        })
+        .expect("exists closure is infallible")
     }
 
     /// Returns true if the expression node is volatile, i.e. whether it can return

@@ -31,7 +31,10 @@ use super::invariants::{
 };
 use super::DdlStatement;
 use crate::builder::{change_redundant_column, unnest_with_options};
-use crate::expr::{Placeholder, Sort as SortExpr, WindowFunction, WindowFunctionParams};
+use crate::expr::{
+    CorrelatedColumnInfo, Placeholder, Sort as SortExpr, WindowFunction,
+    WindowFunctionParams,
+};
 use crate::expr_rewriter::{
     create_col_from_scalar_expr, normalize_cols, normalize_sorts, NamePreserver,
 };
@@ -1529,6 +1532,24 @@ impl LogicalPlan {
         let mut contains = false;
         self.apply_expressions(|expr| {
             Ok(if expr.contains_outer() {
+                contains = true;
+                TreeNodeRecursion::Stop
+            } else {
+                TreeNodeRecursion::Continue
+            })
+        })
+        .unwrap();
+        contains
+    }
+
+    /// If this node's expressions contains any references to an outer subquery
+    pub fn contains_specific_outer_reference(
+        &self,
+        outer_refs: &Vec<CorrelatedColumnInfo>,
+    ) -> bool {
+        let mut contains = false;
+        self.apply_expressions(|expr| {
+            Ok(if expr.contains_specific_outer(outer_refs) {
                 contains = true;
                 TreeNodeRecursion::Stop
             } else {
