@@ -1104,7 +1104,7 @@ mod tests {
                   Inner Join(DelimJoin):  Filter: Boolean(true) [count(inner_table_lv1.a):Int64, a:UInt32;N, b:UInt32;N]
                     Projection: CASE WHEN count(inner_table_lv1.a) IS NULL THEN Int32(0) ELSE count(inner_table_lv1.a) END [count(inner_table_lv1.a):Int64]
                       Aggregate: groupBy=[[]], aggr=[[count(inner_table_lv1.a)]] [count(inner_table_lv1.a):Int64]
-                        Filter: inner_table_lv1.a = outer_ref(outer_table.a) AND outer_ref(outer_table.a) > inner_table_lv1.c AND inner_table_lv1.b = Int32(1) AND outer_ref(outer_table.b) = inner_table_lv1.b [a:UInt32, b:UInt32, c:UInt32, a:UInt32;N, b:UInt32;N]
+                        Filter: inner_table_lv1.a = outer_ref(outer_table.a) AND outer_ref(outer_table.a) > inner_table_lv1.c AND inner_table_lv1.b = Int32(1) AND delim_scan_2.outer_table_b = inner_table_lv1.b [a:UInt32, b:UInt32, c:UInt32, a:UInt32;N, b:UInt32;N]
                           Projection: inner_table_lv1.a, inner_table_lv1.b, inner_table_lv1.c, delim_scan_2.a, delim_scan_2.b [a:UInt32, b:UInt32, c:UInt32, a:UInt32;N, b:UInt32;N]
                             Inner Join(DelimJoin):  Filter: Boolean(true) [a:UInt32, b:UInt32, c:UInt32, a:UInt32;N, b:UInt32;N]
                               TableScan: inner_table_lv1 [a:UInt32, b:UInt32, c:UInt32]
