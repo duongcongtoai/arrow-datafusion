@@ -114,38 +114,6 @@ fn natural_join(
 }
 
 impl DependentJoinDecorrelator {
-    fn init(&mut self, dependent_join_node: &DependentJoin) {
-        self.domains = dependent_join_node
-            .correlated_columns
-            .iter()
-            .cloned()
-            .collect();
-        self.delim_types = self
-            .domains
-            .iter()
-            .map(|CorrelatedColumnInfo { data_type, .. }| data_type.clone())
-            .collect();
-
-        dependent_join_node
-            .correlated_columns
-            .iter()
-            .for_each(|info| {
-                let cols = self.correlated_map.entry(info.depth).or_default();
-                let to_insert = CorrelatedColumnInfo {
-                    col: info.col.clone(),
-                    data_type: info.data_type.clone(),
-                    depth: info.depth,
-                };
-                if !cols.contains(&to_insert) {
-                    cols.push(CorrelatedColumnInfo {
-                        col: info.col.clone(),
-                        data_type: info.data_type.clone(),
-                        depth: info.depth,
-                    });
-                }
-            });
-    }
-
     fn new_root() -> Self {
         Self {
             domains: IndexSet::new(),
@@ -242,6 +210,12 @@ impl DependentJoinDecorrelator {
         false
     }
 
+    fn decorrelate_independent(&mut self, plan: &LogicalPlan) -> Result<LogicalPlan> {
+        let mut decorrelator = DependentJoinDecorrelator::new_root();
+
+        decorrelator.decorrelate(plan, true, 0)
+    }
+
     fn decorrelate(
         &mut self,
         plan: &LogicalPlan,
@@ -257,7 +231,7 @@ impl DependentJoinDecorrelator {
                 // because after DecorrelateDependentJoin at parent level
                 // this correlated_columns list are not mutated yet
                 let new_left = if djoin.correlated_columns.is_empty() {
-                    self.pushdown_independent(left)?
+                    self.decorrelate_independent(left)?
                 } else {
                     self.push_down_dependent_join(
                         left,
@@ -265,6 +239,8 @@ impl DependentJoinDecorrelator {
                         lateral_depth,
                     )?
                 };
+
+                // TODO: rewrite based on correlated_map.
 
                 // if the pushdown happens, it means
                 // the DELIM join has happend somewhere
@@ -276,7 +252,7 @@ impl DependentJoinDecorrelator {
                 // );
                 new_left
             } else {
-                self.init(djoin);
+                // self.init(djoin);
                 self.decorrelate(left, true, 0)?
             };
             let lateral_depth = 0;
@@ -450,9 +426,6 @@ impl DependentJoinDecorrelator {
             join_type,
             extra_expr_after_join,
         ))
-    }
-    fn pushdown_independent(&mut self, _node: &LogicalPlan) -> Result<LogicalPlan> {
-        unimplemented!()
     }
 
     #[allow(dead_code)]
@@ -1107,7 +1080,7 @@ mod tests {
                   Inner Join(DelimJoin):  Filter: Boolean(true) [count(inner_table_lv1.a):Int64, a:UInt32;N, b:UInt32;N]
                     Projection: CASE WHEN count(inner_table_lv1.a) IS NULL THEN Int32(0) ELSE count(inner_table_lv1.a) END [count(inner_table_lv1.a):Int64]
                       Aggregate: groupBy=[[]], aggr=[[count(inner_table_lv1.a)]] [count(inner_table_lv1.a):Int64]
-                        Filter: inner_table_lv1.a = outer_ref(outer_table.a) AND outer_ref(outer_table.a) > inner_table_lv1.c AND inner_table_lv1.b = Int32(1) AND delim_scan_2.outer_table_b = inner_table_lv1.b [a:UInt32, b:UInt32, c:UInt32, a:UInt32;N, b:UInt32;N]
+                        Filter: inner_table_lv1.a = outer_ref(outer_table.a) AND outer_ref(outer_table.a) > inner_table_lv1.c AND inner_table_lv1.b = Int32(1) AND outer_ref(outer_table.b) = inner_table_lv1.b [a:UInt32, b:UInt32, c:UInt32, a:UInt32;N, b:UInt32;N]
                           Projection: inner_table_lv1.a, inner_table_lv1.b, inner_table_lv1.c, delim_scan_2.a, delim_scan_2.b [a:UInt32, b:UInt32, c:UInt32, a:UInt32;N, b:UInt32;N]
                             Inner Join(DelimJoin):  Filter: Boolean(true) [a:UInt32, b:UInt32, c:UInt32, a:UInt32;N, b:UInt32;N]
                               TableScan: inner_table_lv1 [a:UInt32, b:UInt32, c:UInt32]
