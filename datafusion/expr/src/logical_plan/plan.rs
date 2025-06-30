@@ -322,12 +322,11 @@ impl DelimGet {
             return plan_err!("failed to construct DelimGet: empty correlated columns");
         }
 
-        let mut processed_columns:Vec<CorrelatedColumnInfo> = vec![];
-        for info in correlated_columns{
+        let mut processed_columns: Vec<CorrelatedColumnInfo> = vec![];
+        for info in correlated_columns {
             // Add "_d" suffix to the relation name
             if let Some(ref relation) = info.col.relation {
-                let new_relation =
-                    Some(TableReference::bare(format!("{}_d", relation)));
+                let new_relation = Some(TableReference::bare(format!("{}_d", relation)));
 
                 processed_columns.push(CorrelatedColumnInfo {
                     col: Column::new(new_relation, info.col.name.clone()),
@@ -335,9 +334,7 @@ impl DelimGet {
                     depth: info.depth,
                 });
             } else {
-                return internal_err!(
-                    "correlated columns should have table reference"
-                );
+                return internal_err!("correlated columns should have table reference");
             }
         }
 
@@ -345,7 +342,7 @@ impl DelimGet {
         let first_table_ref = processed_columns[0].col.relation.clone();
 
         // Validate all columns come from the same table
-        for column_info in &processed_columns{
+        for column_info in &processed_columns {
             if column_info.col.relation != first_table_ref {
                 // TODO: add multiple delim join support.
                 // return internal_err!(
