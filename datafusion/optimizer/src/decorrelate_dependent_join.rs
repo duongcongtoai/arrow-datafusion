@@ -135,16 +135,16 @@ impl DependentJoinDecorrelator {
 
         // TODO: it's better if dependentjoin node store all outer ref on RHS itself
         let all_outer_ref = node.right.all_out_ref_exprs();
-        let parent_correlated_columns =
-            correlated_columns_from_parent.iter().filter(|info| {
-                all_outer_ref.contains(&Expr::OuterReferenceColumn(
-                    info.data_type.clone(),
-                    info.col.clone(),
-                ))
-            });
+        // let parent_correlated_columns =
+        //     correlated_columns_from_parent.iter().filter(|info| {
+        //         all_outer_ref.contains(&Expr::OuterReferenceColumn(
+        //             info.data_type.clone(),
+        //             info.col.clone(),
+        //         ))
+        //     });
 
         let domains: IndexSet<_> = current_depth_correlated_columns
-            .chain(parent_correlated_columns)
+            .chain(correlated_columns_from_parent)
             .unique()
             .cloned()
             .collect();
@@ -247,12 +247,13 @@ impl DependentJoinDecorrelator {
             parent_propagate_nulls,
             lateral_depth,
         )?;
-        let (join_condition, join_type, post_join_expr) = self.delim_join_conditions(
-            node,
-            right.schema().columns(),
-            decorrelator.delim_scan_relation_name(),
-            perform_delim,
-        )?;
+        let (join_condition, join_type, post_join_expr) = decorrelator
+            .delim_join_conditions(
+                node,
+                right.schema().columns(),
+                decorrelator.delim_scan_relation_name(),
+                perform_delim,
+            )?;
 
         let mut builder = LogicalPlanBuilder::new(new_left).join(
             right,
@@ -616,7 +617,6 @@ impl DependentJoinDecorrelator {
                 any => {
                     let delim_scan = self.build_delim_scan()?;
                     let left = self.decorrelate_plan(any.clone())?;
-
                     let _dedup_cols = delim_scan.schema().columns();
                     let cross_join = natural_join(
                         LogicalPlanBuilder::new(left),
@@ -734,13 +734,13 @@ impl DependentJoinDecorrelator {
                         join_type = JoinType::Left;
                     }
 
-                    let delim_conditions = vec![];
-                    // for (lhs, rhs) in extra_group_columns
-                    //     .iter()
-                    //     .zip(delim_scan_above_agg.schema().columns().iter())
-                    // {
-                    //     delim_conditions.push((lhs.clone(), rhs.clone()));
-                    // }
+                    let mut delim_conditions = vec![];
+                    for (lhs, rhs) in extra_group_columns
+                        .iter()
+                        .zip(delim_scan_above_agg.schema().columns().iter())
+                    {
+                        delim_conditions.push((lhs.clone(), rhs.clone()));
+                    }
 
                     for agg_expr in agg_expr.iter() {
                         match agg_expr {
@@ -1595,16 +1595,23 @@ mod tests {
         let inner_table_lv1 = test_table_scan_with_name("T2")?;
 
         let inner_table_lv2 = test_table_scan_with_name("T3")?;
+
+        // two outer columns are referenced here T1.a and T1.c
+        // even if T2 never reference T1.c
+        // such reference from scalar_sq_level2 will enforce
+        // the delim scan at T2 includes T1.c
         let scalar_sq_level2 = Arc::new(
             LogicalPlanBuilder::from(inner_table_lv2)
                 .filter(
                     col("T3.b")
                         .eq(out_ref_col(ArrowDataType::UInt32, "T2.b"))
-                        .and(col("T3.a").eq(out_ref_col(ArrowDataType::UInt32, "T1.a"))),
+                        .and(col("T3.a").eq(out_ref_col(ArrowDataType::UInt32, "T1.a")))
+                        .and(col("T3.c").eq(out_ref_col(ArrowDataType::UInt32, "T1.c"))),
                 )?
                 .aggregate(Vec::<Expr>::new(), vec![sum(col("T3.a"))])?
                 .build()?,
         );
+
         let scalar_sq_level1 = Arc::new(
             LogicalPlanBuilder::from(inner_table_lv1.clone())
                 .filter(
@@ -1650,36 +1657,38 @@ mod tests {
         //                   TableScan: inner_table_lv2
         assert_decorrelate!(plan, @r"
         Projection: t1.a, t1.b, t1.c [a:UInt32, b:UInt32, c:UInt32]
-          Filter: t1.c = Int32(123) AND __scalar_sq_2.output > Int32(5) [a:UInt32, b:UInt32, c:UInt32, count(t2.a):Int64;N, t1_a:UInt32;N, t1_a:UInt32;N, __scalar_sq_2.output:Int64;N]
-            Projection: t1.a, t1.b, t1.c, count(t2.a), t1_dscan_5.t1_a, t1_dscan_1.t1_a, count(t2.a) AS __scalar_sq_2.output [a:UInt32, b:UInt32, c:UInt32, count(t2.a):Int64;N, t1_a:UInt32;N, t1_a:UInt32;N, __scalar_sq_2.output:Int64;N]
-              Left Join(ComparisonJoin):  Filter: t1.a IS NOT DISTINCT FROM delim_scan_5.t1_a [a:UInt32, b:UInt32, c:UInt32, count(t2.a):Int64;N, t1_a:UInt32;N, t1_a:UInt32;N]
+          Filter: t1.c = Int32(123) AND __scalar_sq_2.output > Int32(5) [a:UInt32, b:UInt32, c:UInt32, CASE WHEN count(t2.a) IS NULL THEN Int32(0) ELSE count(t2.a) END:Int32;N, t1_a:UInt32;N, __scalar_sq_2.output:Int32;N]
+            Projection: t1.a, t1.b, t1.c, CASE WHEN count(t2.a) IS NULL THEN Int32(0) ELSE count(t2.a) END, t1_dscan_5.t1_a, CASE WHEN count(t2.a) IS NULL THEN Int32(0) ELSE count(t2.a) END AS __scalar_sq_2.output [a:UInt32, b:UInt32, c:UInt32, CASE WHEN count(t2.a) IS NULL THEN Int32(0) ELSE count(t2.a) END:Int32;N, t1_a:UInt32;N, __scalar_sq_2.output:Int32;N]
+              Left Join(ComparisonJoin):  Filter: t1.a IS NOT DISTINCT FROM delim_scan_5.t1_a AND t1.c IS NOT DISTINCT FROM delim_scan_5.t1_c [a:UInt32, b:UInt32, c:UInt32, CASE WHEN count(t2.a) IS NULL THEN Int32(0) ELSE count(t2.a) END:Int32;N, t1_a:UInt32;N]
                 TableScan: t1 [a:UInt32, b:UInt32, c:UInt32]
-                Inner Join(DelimJoin):  Filter: Boolean(true) [count(t2.a):Int64, t1_a:UInt32;N, t1_a:UInt32;N]
-                  Projection: CASE WHEN count(t2.a) IS NULL THEN Int32(0) ELSE count(t2.a) END, t1_dscan_5.t1_a [count(t2.a):Int64, t1_a:UInt32;N]
-                    Aggregate: groupBy=[[t1_dscan_5.t1_a]], aggr=[[count(t2.a)]] [t1_a:UInt32;N, count(t2.a):Int64]
-                      Projection: t2.a, t2.b, t2.c, t1_dscan_5.t1_a [a:UInt32, b:UInt32, c:UInt32, t1_a:UInt32;N]
-                        Filter: t2.a = t1_dscan_5.t1_a AND __scalar_sq_1.output > Int32(300000) [a:UInt32, b:UInt32, c:UInt32, sum(t3.a):UInt64;N, t1_a:UInt32;N, t2_b:UInt32;N, t2_b:UInt32;N, t1_a:UInt32;N, __scalar_sq_1.output:UInt64;N]
-                          Projection: t2.a, t2.b, t2.c, sum(t3.a), t1_dscan_5.t1_a, t2_dscan_4.t2_b, t2_dscan_2.t2_b, t1_dscan_3.t1_a, sum(t3.a) AS __scalar_sq_1.output [a:UInt32, b:UInt32, c:UInt32, sum(t3.a):UInt64;N, t1_a:UInt32;N, t2_b:UInt32;N, t2_b:UInt32;N, t1_a:UInt32;N, __scalar_sq_1.output:UInt64;N]
-                            Left Join(ComparisonJoin):  Filter: t2.b IS NOT DISTINCT FROM delim_scan_5.t2_b [a:UInt32, b:UInt32, c:UInt32, sum(t3.a):UInt64;N, t1_a:UInt32;N, t2_b:UInt32;N, t2_b:UInt32;N, t1_a:UInt32;N]
-                              TableScan: t2 [a:UInt32, b:UInt32, c:UInt32]
-                              Inner Join(DelimJoin):  Filter: Boolean(true) [sum(t3.a):UInt64;N, t1_a:UInt32;N, t2_b:UInt32;N, t2_b:UInt32;N, t1_a:UInt32;N]
-                                Projection: sum(t3.a), t1_dscan_5.t1_a, t2_dscan_4.t2_b [sum(t3.a):UInt64;N, t1_a:UInt32;N, t2_b:UInt32;N]
-                                  Aggregate: groupBy=[[t2_dscan_4.t2_b, t1_dscan_5.t1_a, t1_dscan_5.t1_a]], aggr=[[sum(t3.a)]] [t2_b:UInt32;N, t1_a:UInt32;N, sum(t3.a):UInt64;N]
-                                    Filter: t3.b = t2_dscan_4.t2_b AND t3.a = t1_dscan_5.t1_a [a:UInt32, b:UInt32, c:UInt32, t2_b:UInt32;N, t1_a:UInt32;N]
-                                      Inner Join(DelimJoin):  Filter: Boolean(true) [a:UInt32, b:UInt32, c:UInt32, t2_b:UInt32;N, t1_a:UInt32;N]
-                                        TableScan: t3 [a:UInt32, b:UInt32, c:UInt32]
-                                        Cross Join(ComparisonJoin):  [t2_b:UInt32;N, t1_a:UInt32;N]
-                                          SubqueryAlias: t2_dscan_4 [t2_b:UInt32;N]
-                                            DelimGet: t2.b [t2_b:UInt32;N]
-                                          SubqueryAlias: t1_dscan_5 [t1_a:UInt32;N]
-                                            DelimGet: t1.a [t1_a:UInt32;N]
-                                Cross Join(ComparisonJoin):  [t2_b:UInt32;N, t1_a:UInt32;N]
-                                  SubqueryAlias: t2_dscan_2 [t2_b:UInt32;N]
-                                    DelimGet: t2.b [t2_b:UInt32;N]
-                                  SubqueryAlias: t1_dscan_3 [t1_a:UInt32;N]
-                                    DelimGet: t1.a [t1_a:UInt32;N]
-                  SubqueryAlias: t1_dscan_1 [t1_a:UInt32;N]
-                    DelimGet: t1.a [t1_a:UInt32;N]
+                Projection: CASE WHEN count(t2.a) IS NULL THEN Int32(0) ELSE count(t2.a) END, t1_dscan_5.t1_a [CASE WHEN count(t2.a) IS NULL THEN Int32(0) ELSE count(t2.a) END:Int32, t1_a:UInt32;N]
+                  Inner Join(DelimJoin):  Filter: t1_dscan_5.t1_a IS NOT DISTINCT FROM t1_dscan_1.t1_a [count(t2.a):Int64, t1_a:UInt32;N, t1_a:UInt32;N]
+                    Projection: CASE WHEN count(t2.a) IS NULL THEN Int32(0) ELSE count(t2.a) END, t1_dscan_5.t1_a [count(t2.a):Int64, t1_a:UInt32;N]
+                      Aggregate: groupBy=[[t1_dscan_5.t1_a]], aggr=[[count(t2.a)]] [t1_a:UInt32;N, count(t2.a):Int64]
+                        Projection: t2.a, t2.b, t2.c, t1_dscan_5.t1_a [a:UInt32, b:UInt32, c:UInt32, t1_a:UInt32;N]
+                          Filter: t2.a = t1_dscan_5.t1_a AND __scalar_sq_1.output > Int32(300000) [a:UInt32, b:UInt32, c:UInt32, sum(t3.a):UInt64;N, t1_c:UInt32;N, t1_a:UInt32;N, t2_b:UInt32;N, __scalar_sq_1.output:UInt64;N]
+                            Projection: t2.a, t2.b, t2.c, sum(t3.a), t1_dscan_5.t1_c, t1_dscan_5.t1_a, t2_dscan_4.t2_b, sum(t3.a) AS __scalar_sq_1.output [a:UInt32, b:UInt32, c:UInt32, sum(t3.a):UInt64;N, t1_c:UInt32;N, t1_a:UInt32;N, t2_b:UInt32;N, __scalar_sq_1.output:UInt64;N]
+                              Left Join(ComparisonJoin):  Filter: t2.b IS NOT DISTINCT FROM delim_scan_5.t2_b [a:UInt32, b:UInt32, c:UInt32, sum(t3.a):UInt64;N, t1_c:UInt32;N, t1_a:UInt32;N, t2_b:UInt32;N]
+                                TableScan: t2 [a:UInt32, b:UInt32, c:UInt32]
+                                Projection: sum(t3.a), t1_dscan_5.t1_c, t1_dscan_5.t1_a, t2_dscan_4.t2_b [sum(t3.a):UInt64;N, t1_c:UInt32;N, t1_a:UInt32;N, t2_b:UInt32;N]
+                                  Inner Join(DelimJoin):  Filter: t2_dscan_4.t2_b IS NOT DISTINCT FROM t2_dscan_2.t2_b AND t1_dscan_5.t1_a IS NOT DISTINCT FROM t1_dscan_3.t1_a AND t1_dscan_5.t1_a IS NOT DISTINCT FROM t1_dscan_3.t1_c [sum(t3.a):UInt64;N, t1_c:UInt32;N, t1_a:UInt32;N, t2_b:UInt32;N, t2_b:UInt32;N, t1_a:UInt32;N, t1_c:UInt32;N]
+                                    Projection: sum(t3.a), t1_dscan_5.t1_c, t1_dscan_5.t1_a, t2_dscan_4.t2_b [sum(t3.a):UInt64;N, t1_c:UInt32;N, t1_a:UInt32;N, t2_b:UInt32;N]
+                                      Aggregate: groupBy=[[t2_dscan_4.t2_b, t1_dscan_5.t1_a, t1_dscan_5.t1_a, t1_dscan_5.t1_c]], aggr=[[sum(t3.a)]] [t2_b:UInt32;N, t1_a:UInt32;N, t1_c:UInt32;N, sum(t3.a):UInt64;N]
+                                        Filter: t3.b = t2_dscan_4.t2_b AND t3.a = t1_dscan_5.t1_a AND t3.c = t1_dscan_5.t1_c [a:UInt32, b:UInt32, c:UInt32, t2_b:UInt32;N, t1_a:UInt32;N, t1_c:UInt32;N]
+                                          Inner Join(DelimJoin):  Filter: Boolean(true) [a:UInt32, b:UInt32, c:UInt32, t2_b:UInt32;N, t1_a:UInt32;N, t1_c:UInt32;N]
+                                            TableScan: t3 [a:UInt32, b:UInt32, c:UInt32]
+                                            Cross Join(ComparisonJoin):  [t2_b:UInt32;N, t1_a:UInt32;N, t1_c:UInt32;N]
+                                              SubqueryAlias: t2_dscan_4 [t2_b:UInt32;N]
+                                                DelimGet: t2.b [t2_b:UInt32;N]
+                                              SubqueryAlias: t1_dscan_5 [t1_a:UInt32;N, t1_c:UInt32;N]
+                                                DelimGet: t1.a, t1.c [t1_a:UInt32;N, t1_c:UInt32;N]
+                                    Cross Join(ComparisonJoin):  [t2_b:UInt32;N, t1_a:UInt32;N, t1_c:UInt32;N]
+                                      SubqueryAlias: t2_dscan_2 [t2_b:UInt32;N]
+                                        DelimGet: t2.b [t2_b:UInt32;N]
+                                      SubqueryAlias: t1_dscan_3 [t1_a:UInt32;N, t1_c:UInt32;N]
+                                        DelimGet: t1.a, t1.c [t1_a:UInt32;N, t1_c:UInt32;N]
+                    SubqueryAlias: t1_dscan_1 [t1_a:UInt32;N]
+                      DelimGet: t1.a [t1_a:UInt32;N]
         ");
         Ok(())
     }
