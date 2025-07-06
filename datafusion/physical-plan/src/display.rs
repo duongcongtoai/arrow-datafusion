@@ -25,8 +25,9 @@ use std::fmt::Formatter;
 use arrow::datatypes::SchemaRef;
 
 use datafusion_common::display::{
-    tree_render, DisplayAs, DisplayFormatType, GraphvizBuilder, PlanType, StringifiedPlan,
+    tree_render, GraphvizBuilder, PlanType, StringifiedPlan,
 };
+pub use datafusion_common::display::{DisplayAs, DisplayFormatType};
 use datafusion_expr::display_schema;
 use datafusion_physical_expr::LexOrdering;
 
@@ -224,7 +225,7 @@ impl<'a> DisplayableExecutionPlan<'a> {
     ///
     /// See [`DisplayFormatType::TreeRender`] for more details.
     pub fn tree_render(&self) -> impl fmt::Display + 'a {
-        tree_render(self.inner)
+        tree_render(&self.inner)
     }
 
     /// Return a single-line summary of the root of the plan
