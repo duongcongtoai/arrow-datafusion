@@ -18,7 +18,7 @@
 //! Types for plan display
 
 use crate::display::{DisplayAs, DisplayFormatType};
-use crate::tree_node::{TreeNode, TreeNodeRecursion};
+use crate::tree_node::{DynTreeNode, TreeNode, TreeNodeRecursion};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Formatter;
 use std::sync::Arc;
@@ -70,6 +70,24 @@ impl TreeRenderVisitor<'_, '_> {
     const MAXIMUM_RENDER_WIDTH: usize = 240; // Maximum total width of the rendered tree
     const NODE_RENDER_WIDTH: usize = 29; // Width of each node's box
     const MAX_EXTRA_LINES: usize = 30; // Maximum number of extra info lines per node
+
+    fn visit_dyn<T: ?Sized + DynTreeNode + DisplayAs>(
+        &mut self,
+        plan: &T,
+    ) -> Result<(), fmt::Error> {
+        let root = RenderTree::create_dyn_tree(plan);
+
+        for y in 0..root.height {
+            // Start by rendering the top layer.
+            self.render_top_layer(&root, y)?;
+            // Now we render the content of the boxes
+            self.render_box_content(&root, y)?;
+            // Render the bottom layer of each of the boxes
+            self.render_bottom_layer(&root, y)?;
+        }
+
+        Ok(())
+    }
 
     /// Main entry point for rendering an execution plan as a tree.
     /// The rendering process happens in three stages for each level of the tree:
@@ -560,6 +578,15 @@ pub struct RenderTree {
 }
 
 impl RenderTree {
+    fn create_dyn_tree<T: ?Sized + DynTreeNode + DisplayAs>(node: &T) -> Self {
+        let (width, height) = get_dyn_tree_width_height(node);
+
+        let mut result = Self::new(width, height);
+
+        create_dyn_tree_recursive(&mut result, node, 0, 0);
+
+        result
+    }
     fn create_tree<T: FormattedTreeNode>(node: &T) -> Self {
         let (width, height) = get_tree_width_height(node);
 
@@ -607,6 +634,22 @@ impl RenderTree {
         y * self.width + x
     }
 
+    fn fmt_display_dyn<T: ?Sized + DisplayAs>(node: &T) -> impl fmt::Display + '_ {
+        struct Wrapper<'a, T: ?Sized + DisplayAs> {
+            node: &'a T,
+        }
+
+        impl<T> fmt::Display for Wrapper<'_, T>
+        where
+            T: ?Sized + DisplayAs,
+        {
+            fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+                self.node.fmt_as(DisplayFormatType::TreeRender, f)
+            }
+        }
+        Wrapper { node }
+    }
+
     fn fmt_display<T: FormattedTreeNode>(node: &T) -> impl fmt::Display + '_ {
         struct Wrapper<'a, T: FormattedTreeNode> {
             node: &'a T,
@@ -651,6 +694,25 @@ pub fn get_tree_width_height<T: FormattedTreeNode>(plan: &T) -> (usize, usize) {
     *height += 1;
 
     (*width, *height)
+}
+
+pub fn get_dyn_tree_width_height<T: ?Sized + DynTreeNode + DisplayAs>(
+    plan: &T,
+) -> (usize, usize) {
+    let (mut width, mut height) = (0, 0);
+    let children = plan.arc_children();
+    if children.is_empty() {
+        return (1, 1);
+    }
+    for c in children {
+        let (child_width, child_height) = get_dyn_tree_width_height(c.as_ref());
+        width += child_width;
+        height = cmp::max(height, child_height);
+    }
+
+    height += 1;
+
+    (width, height)
 }
 
 /// Recursively builds the render tree structure.
@@ -706,6 +768,59 @@ pub fn create_tree_recursive<T: FormattedTreeNode>(
     result.set_node(x, y, Arc::new(rendered_node));
 
     *width_ref
+}
+
+pub fn create_dyn_tree_recursive<T: ?Sized + DynTreeNode + DisplayAs>(
+    result: &mut RenderTree,
+    plan: &T,
+    x: usize,
+    y: usize,
+) -> usize {
+    let display_info = RenderTree::fmt_display_dyn(plan).to_string();
+    let mut extra_info = HashMap::new();
+
+    // Parse the key-value pairs from the formatted string.
+    // See DisplayFormatType::TreeRender for details
+    for line in display_info.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            extra_info.insert(key.to_string(), value.to_string());
+        } else {
+            extra_info.insert(line.to_string(), "".to_string());
+        }
+    }
+
+    let mut rendered_node = RenderTreeNode::new("todo".to_string(), extra_info);
+    let mut width = 0;
+    let children = plan.arc_children();
+    if children.is_empty() {
+        result.set_node(x, y, Arc::new(rendered_node));
+        return 1;
+    }
+    for c in children {
+        let child_x = x + width;
+        let child_y = y + 1;
+        rendered_node.add_child_position(child_x, child_y);
+        width += create_dyn_tree_recursive(result, c.as_ref(), child_x, child_y);
+    }
+
+    result.set_node(x, y, Arc::new(rendered_node));
+    width
+}
+
+pub fn dyn_tree_render<'a, T: ?Sized + DynTreeNode + DisplayAs>(
+    n: &'a T,
+) -> impl fmt::Display + 'a {
+    struct Wrapper<'a, T: ?Sized + DynTreeNode + DisplayAs> {
+        n: &'a T,
+    }
+    impl<T: ?Sized + DynTreeNode + DisplayAs> fmt::Display for Wrapper<'_, T> {
+        fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+            let mut visitor = TreeRenderVisitor { f };
+            visitor.visit_dyn(self.n)
+        }
+    }
+
+    Wrapper { n: n }
 }
 
 // render the whole tree

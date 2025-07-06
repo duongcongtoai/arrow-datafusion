@@ -144,7 +144,18 @@ pub trait DisplayAs {
     /// Should not include a newline
     fn fmt_as(&self, t: DisplayFormatType, f: &mut Formatter) -> fmt::Result;
 }
+impl DisplayAs for &dyn DisplayAs {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
+        (*self).fmt_as(t, f)
+    }
+}
+impl<T: DisplayAs + ?Sized> DisplayAs for Arc<T> {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
+        self.as_ref().fmt_as(t, f)
+    }
+}
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DisplayFormatType {
     /// Default, compact format. Example: `FilterExec: c12 < 10.0`
     ///
