@@ -18,8 +18,9 @@
 //! Types for plan display
 
 use crate::display::{DisplayAs, DisplayFormatType};
-use crate::tree_node::{DynTreeNode, TreeNode, TreeNodeRecursion};
-use std::collections::{BTreeMap, HashMap};
+use crate::tree_node::{TreeNode, TreeNodeRecursion};
+use crate::HashMap;
+use std::collections::{BTreeMap};
 use std::fmt::Formatter;
 use std::sync::Arc;
 use std::{cmp, fmt};
@@ -47,12 +48,23 @@ use std::{cmp, fmt};
 /// 3. Bottom layer: renders the bottom borders and connections
 ///
 /// Each node is rendered in a box of fixed width (NODE_RENDER_WIDTH).
-struct TreeRenderVisitor<'a, 'b> {
-    /// Write to this formatter
-    f: &'a mut Formatter<'b>,
-}
+pub struct TreeRenderVisitor {}
 
-impl TreeRenderVisitor<'_, '_> {
+impl TreeRenderVisitor {
+    /// Main entry point for rendering an execution plan as a tree.
+    /// The rendering process happens in three stages for each level of the tree:
+    /// 1. Render top borders and connections
+    /// 2. Render node content and vertical connections
+    /// 3. Render bottom borders and connections
+    fn visit<T: FormattedTreeNode>(
+        &mut self,
+        plan: &T,
+    ) -> Result<RenderTree, fmt::Error> {
+        let root = RenderTree::create_tree(plan);
+        Ok(root)
+    }
+}
+impl RenderTree {
     // Unicode box-drawing characters for creating borders and connections.
     const LTCORNER: &'static str = "┌"; // Left top corner
     const RTCORNER: &'static str = "┐"; // Right top corner
@@ -71,79 +83,37 @@ impl TreeRenderVisitor<'_, '_> {
     const NODE_RENDER_WIDTH: usize = 29; // Width of each node's box
     const MAX_EXTRA_LINES: usize = 30; // Maximum number of extra info lines per node
 
-    fn visit_dyn<T: ?Sized + DynTreeNode + DisplayAs>(
-        &mut self,
-        plan: &T,
-    ) -> Result<(), fmt::Error> {
-        let root = RenderTree::create_dyn_tree(plan);
-
-        for y in 0..root.height {
-            // Start by rendering the top layer.
-            self.render_top_layer(&root, y)?;
-            // Now we render the content of the boxes
-            self.render_box_content(&root, y)?;
-            // Render the bottom layer of each of the boxes
-            self.render_bottom_layer(&root, y)?;
-        }
-
-        Ok(())
-    }
-
-    /// Main entry point for rendering an execution plan as a tree.
-    /// The rendering process happens in three stages for each level of the tree:
-    /// 1. Render top borders and connections
-    /// 2. Render node content and vertical connections
-    /// 3. Render bottom borders and connections
-    fn visit<T: FormattedTreeNode>(&mut self, plan: &T) -> Result<(), fmt::Error> {
-        let root = RenderTree::create_tree(plan);
-
-        for y in 0..root.height {
-            // Start by rendering the top layer.
-            self.render_top_layer(&root, y)?;
-            // Now we render the content of the boxes
-            self.render_box_content(&root, y)?;
-            // Render the bottom layer of each of the boxes
-            self.render_bottom_layer(&root, y)?;
-        }
-
-        Ok(())
-    }
-
     /// Renders the top layer of boxes at the given y-level of the tree.
     /// This includes:
     /// - Top corners (┌─┐) for nodes
     /// - Horizontal connections between nodes
     /// - Vertical connections to parent nodes
-    fn render_top_layer(
-        &mut self,
-        root: &RenderTree,
-        y: usize,
-    ) -> Result<(), fmt::Error> {
-        for x in 0..root.width {
-            if root.has_node(x, y) {
-                write!(self.f, "{}", Self::LTCORNER)?;
+    fn render_top_layer(&self, f: &mut Formatter, y: usize) -> Result<(), fmt::Error> {
+        for x in 0..self.width {
+            if self.has_node(x, y) {
+                write!(f, "{}", Self::LTCORNER)?;
                 write!(
-                    self.f,
+                    f,
                     "{}",
                     Self::HORIZONTAL.repeat(Self::NODE_RENDER_WIDTH / 2 - 1)
                 )?;
                 if y == 0 {
                     // top level node: no node above this one
-                    write!(self.f, "{}", Self::HORIZONTAL)?;
+                    write!(f, "{}", Self::HORIZONTAL)?;
                 } else {
                     // render connection to node above this one
-                    write!(self.f, "{}", Self::DMIDDLE)?;
+                    write!(f, "{}", Self::DMIDDLE)?;
                 }
                 write!(
-                    self.f,
+                    f,
                     "{}",
                     Self::HORIZONTAL.repeat(Self::NODE_RENDER_WIDTH / 2 - 1)
                 )?;
-                write!(self.f, "{}", Self::RTCORNER)?;
+                write!(f, "{}", Self::RTCORNER)?;
             } else {
                 let mut has_adjacent_nodes = false;
-                for i in 0..(root.width - x) {
-                    has_adjacent_nodes = has_adjacent_nodes || root.has_node(x + i, y);
+                for i in 0..(self.width - x) {
+                    has_adjacent_nodes = has_adjacent_nodes || self.has_node(x + i, y);
                 }
                 if !has_adjacent_nodes {
                     // There are no nodes to the right side of this position
@@ -151,10 +121,10 @@ impl TreeRenderVisitor<'_, '_> {
                     continue;
                 }
                 // there are nodes next to this, fill the space
-                write!(self.f, "{}", &" ".repeat(Self::NODE_RENDER_WIDTH))?;
+                write!(f, "{}", &" ".repeat(Self::NODE_RENDER_WIDTH))?;
             }
         }
-        writeln!(self.f)?;
+        writeln!(f)?;
 
         Ok(())
     }
@@ -164,16 +134,12 @@ impl TreeRenderVisitor<'_, '_> {
     /// - Node names and extra information
     /// - Vertical borders (│) for boxes
     /// - Vertical connections between nodes
-    fn render_box_content(
-        &mut self,
-        root: &RenderTree,
-        y: usize,
-    ) -> Result<(), fmt::Error> {
-        let mut extra_info: Vec<Vec<String>> = vec![vec![]; root.width];
+    fn render_box_content(&self, f: &mut Formatter, y: usize) -> Result<(), fmt::Error> {
+        let mut extra_info: Vec<Vec<String>> = vec![vec![]; self.width];
         let mut extra_height = 0;
 
-        for (x, extra_info_item) in extra_info.iter_mut().enumerate().take(root.width) {
-            if let Some(node) = root.get_node(x, y) {
+        for (x, extra_info_item) in extra_info.iter_mut().enumerate().take(self.width) {
+            if let Some(node) = self.get_node(x, y) {
                 Self::split_up_extra_info(
                     &node.extra_text,
                     extra_info_item,
@@ -189,18 +155,18 @@ impl TreeRenderVisitor<'_, '_> {
 
         // Render the actual node.
         for render_y in 0..=extra_height {
-            for (x, _) in root.nodes.iter().enumerate().take(root.width) {
+            for (x, _) in self.nodes.iter().enumerate().take(self.width) {
                 if x * Self::NODE_RENDER_WIDTH >= Self::MAXIMUM_RENDER_WIDTH {
                     break;
                 }
 
                 let mut has_adjacent_nodes = false;
-                for i in 0..(root.width - x) {
-                    has_adjacent_nodes = has_adjacent_nodes || root.has_node(x + i, y);
+                for i in 0..(self.width - x) {
+                    has_adjacent_nodes = has_adjacent_nodes || self.has_node(x + i, y);
                 }
 
-                if let Some(node) = root.get_node(x, y) {
-                    write!(self.f, "{}", Self::VERTICAL)?;
+                if let Some(node) = self.get_node(x, y) {
+                    write!(f, "{}", Self::VERTICAL)?;
 
                     // Rigure out what to render.
                     let mut render_text = String::new();
@@ -214,84 +180,71 @@ impl TreeRenderVisitor<'_, '_> {
                         &render_text,
                         Self::NODE_RENDER_WIDTH - 2,
                     );
-                    write!(self.f, "{render_text}")?;
+                    write!(f, "{render_text}")?;
 
                     if render_y == halfway_point && node.child_positions.len() > 1 {
-                        write!(self.f, "{}", Self::LMIDDLE)?;
+                        write!(f, "{}", Self::LMIDDLE)?;
                     } else {
-                        write!(self.f, "{}", Self::VERTICAL)?;
+                        write!(f, "{}", Self::VERTICAL)?;
                     }
                 } else if render_y == halfway_point {
-                    let has_child_to_the_right =
-                        Self::should_render_whitespace(root, x, y);
-                    if root.has_node(x, y + 1) {
+                    let has_child_to_the_right = self.should_render_whitespace(x, y);
+                    if self.has_node(x, y + 1) {
                         // Node right below this one.
                         write!(
-                            self.f,
+                            f,
                             "{}",
                             Self::HORIZONTAL.repeat(Self::NODE_RENDER_WIDTH / 2)
                         )?;
                         if has_child_to_the_right {
-                            write!(self.f, "{}", Self::TMIDDLE)?;
+                            write!(f, "{}", Self::TMIDDLE)?;
                             // Have another child to the right, Keep rendering the line.
                             write!(
-                                self.f,
+                                f,
                                 "{}",
                                 Self::HORIZONTAL.repeat(Self::NODE_RENDER_WIDTH / 2)
                             )?;
                         } else {
-                            write!(self.f, "{}", Self::RTCORNER)?;
+                            write!(f, "{}", Self::RTCORNER)?;
                             if has_adjacent_nodes {
                                 // Only a child below this one: fill the reset with spaces.
-                                write!(
-                                    self.f,
-                                    "{}",
-                                    " ".repeat(Self::NODE_RENDER_WIDTH / 2)
-                                )?;
+                                write!(f, "{}", " ".repeat(Self::NODE_RENDER_WIDTH / 2))?;
                             }
                         }
                     } else if has_child_to_the_right {
                         // Child to the right, but no child right below this one: render a full
                         // line.
                         write!(
-                            self.f,
+                            f,
                             "{}",
                             Self::HORIZONTAL.repeat(Self::NODE_RENDER_WIDTH)
                         )?;
                     } else if has_adjacent_nodes {
                         // Empty spot: render spaces.
-                        write!(self.f, "{}", " ".repeat(Self::NODE_RENDER_WIDTH))?;
+                        write!(f, "{}", " ".repeat(Self::NODE_RENDER_WIDTH))?;
                     }
                 } else if render_y >= halfway_point {
-                    if root.has_node(x, y + 1) {
+                    if self.has_node(x, y + 1) {
                         // Have a node below this empty spot: render a vertical line.
                         write!(
-                            self.f,
+                            f,
                             "{}{}",
                             " ".repeat(Self::NODE_RENDER_WIDTH / 2),
                             Self::VERTICAL
                         )?;
-                        if has_adjacent_nodes
-                            || Self::should_render_whitespace(root, x, y)
-                        {
-                            write!(
-                                self.f,
-                                "{}",
-                                " ".repeat(Self::NODE_RENDER_WIDTH / 2)
-                            )?;
+                        if has_adjacent_nodes || self.should_render_whitespace(x, y) {
+                            write!(f, "{}", " ".repeat(Self::NODE_RENDER_WIDTH / 2))?;
                         }
-                    } else if has_adjacent_nodes
-                        || Self::should_render_whitespace(root, x, y)
-                    {
+                    } else if has_adjacent_nodes || self.should_render_whitespace(x, y) {
                         // Empty spot: render spaces.
-                        write!(self.f, "{}", " ".repeat(Self::NODE_RENDER_WIDTH))?;
+                        write!(f, "{}", " ".repeat(Self::NODE_RENDER_WIDTH))?;
                     }
                 } else if has_adjacent_nodes {
                     // Empty spot: render spaces.
-                    write!(self.f, "{}", " ".repeat(Self::NODE_RENDER_WIDTH))?;
+                    write!(f, "{}", " ".repeat(Self::NODE_RENDER_WIDTH))?;
                 }
             }
-            writeln!(self.f)?;
+            writeln!(f)?;
         }
 
         Ok(())
@@ -302,50 +255,46 @@ impl TreeRenderVisitor<'_, '_> {
     /// - Bottom corners (└─┘) for nodes
     /// - Horizontal connections between nodes
     /// - Vertical connections to child nodes
-    fn render_bottom_layer(
-        &mut self,
-        root: &RenderTree,
-        y: usize,
-    ) -> Result<(), fmt::Error> {
-        for x in 0..=root.width {
+    fn render_bottom_layer(&self, f: &mut Formatter, y: usize) -> Result<(), fmt::Error> {
+        for x in 0..=self.width {
             if x * Self::NODE_RENDER_WIDTH >= Self::MAXIMUM_RENDER_WIDTH {
                 break;
             }
             let mut has_adjacent_nodes = false;
-            for i in 0..(root.width - x) {
-                has_adjacent_nodes = has_adjacent_nodes || root.has_node(x + i, y);
+            for i in 0..(self.width - x) {
+                has_adjacent_nodes = has_adjacent_nodes || self.has_node(x + i, y);
             }
-            if root.get_node(x, y).is_some() {
-                write!(self.f, "{}", Self::LDCORNER)?;
+            if self.get_node(x, y).is_some() {
+                write!(f, "{}", Self::LDCORNER)?;
                 write!(
-                    self.f,
+                    f,
                     "{}",
                     Self::HORIZONTAL.repeat(Self::NODE_RENDER_WIDTH / 2 - 1)
                 )?;
-                if root.has_node(x, y + 1) {
+                if self.has_node(x, y + 1) {
                     // node below this one: connect to that one
-                    write!(self.f, "{}", Self::TMIDDLE)?;
+                    write!(f, "{}", Self::TMIDDLE)?;
                 } else {
                     // no node below this one: end the box
-                    write!(self.f, "{}", Self::HORIZONTAL)?;
+                    write!(f, "{}", Self::HORIZONTAL)?;
                 }
                 write!(
-                    self.f,
+                    f,
                     "{}",
                     Self::HORIZONTAL.repeat(Self::NODE_RENDER_WIDTH / 2 - 1)
                 )?;
-                write!(self.f, "{}", Self::RDCORNER)?;
-            } else if root.has_node(x, y + 1) {
-                write!(self.f, "{}", &" ".repeat(Self::NODE_RENDER_WIDTH / 2))?;
-                write!(self.f, "{}", Self::VERTICAL)?;
-                if has_adjacent_nodes || Self::should_render_whitespace(root, x, y) {
-                    write!(self.f, "{}", &" ".repeat(Self::NODE_RENDER_WIDTH / 2))?;
+                write!(f, "{}", Self::RDCORNER)?;
+            } else if self.has_node(x, y + 1) {
+                write!(f, "{}", &" ".repeat(Self::NODE_RENDER_WIDTH / 2))?;
+                write!(f, "{}", Self::VERTICAL)?;
+                if has_adjacent_nodes || self.should_render_whitespace(x, y) {
+                    write!(f, "{}", &" ".repeat(Self::NODE_RENDER_WIDTH / 2))?;
                 }
-            } else if has_adjacent_nodes || Self::should_render_whitespace(root, x, y) {
-                write!(self.f, "{}", &" ".repeat(Self::NODE_RENDER_WIDTH))?;
+            } else if has_adjacent_nodes || self.should_render_whitespace(x, y) {
+                write!(f, "{}", &" ".repeat(Self::NODE_RENDER_WIDTH))?;
             }
         }
-        writeln!(self.f)?;
+        writeln!(f)?;
 
         Ok(())
     }
@@ -449,12 +398,12 @@ impl TreeRenderVisitor<'_, '_> {
     /// 1. Maintaining proper spacing between sibling nodes
     /// 2. Ensuring correct alignment of connections between parents and children
     /// 3. Preserving the tree structure's visual clarity
-    fn should_render_whitespace(root: &RenderTree, x: usize, y: usize) -> bool {
+    fn should_render_whitespace(&self, x: usize, y: usize) -> bool {
         let mut found_children = 0;
 
         for i in (0..=x).rev() {
-            let node = root.get_node(i, y);
-            if root.has_node(i, y + 1) {
+            let node = self.get_node(i, y);
+            if self.has_node(i, y + 1) {
                 found_children += 1;
             }
             if let Some(node) = node {
@@ -528,16 +477,11 @@ pub trait FormattedTreeNode: TreeNode + DisplayAs {
 
 /// Represents a 2D coordinate in the rendered tree.
 /// Used to track positions of nodes and their connections.
-struct Coordinate {
-    /// Horizontal position in the tree
-    x: usize,
-    /// Vertical position in the tree
-    y: usize,
-}
+struct Coordinate {}
 
 impl Coordinate {
-    fn new(x: usize, y: usize) -> Self {
-        Coordinate { x, y }
+    fn new() -> Self {
+        Coordinate {}
     }
 }
 
@@ -553,7 +497,7 @@ pub struct RenderTreeNode {
 }
 
 impl RenderTreeNode {
-    fn new(name: String, extra_text: HashMap<String, String>) -> Self {
+    pub fn new(name: String, extra_text: HashMap<String, String>) -> Self {
         RenderTreeNode {
             name,
             extra_text,
@@ -561,8 +505,8 @@ impl RenderTreeNode {
         }
     }
 
-    fn add_child_position(&mut self, x: usize, y: usize) {
-        self.child_positions.push(Coordinate::new(x, y));
+    pub fn add_child_position(&mut self) {
+        self.child_positions.push(Coordinate::new());
     }
 }
 
@@ -577,16 +521,22 @@ pub struct RenderTree {
     height: usize,
 }
 
-impl RenderTree {
-    fn create_dyn_tree<T: ?Sized + DynTreeNode + DisplayAs>(node: &T) -> Self {
-        let (width, height) = get_dyn_tree_width_height(node);
+impl fmt::Display for RenderTree {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        for y in 0..self.height {
+            // Start by rendering the top layer.
+            self.render_top_layer(f, y)?;
+            // Now we render the content of the boxes
+            self.render_box_content(f, y)?;
+            // Render the bottom layer of each of the boxes
+            self.render_bottom_layer(f, y)?;
+        }
 
-        let mut result = Self::new(width, height);
-
-        create_dyn_tree_recursive(&mut result, node, 0, 0);
-
-        result
+        Ok(())
     }
+}
+
+impl RenderTree {
     fn create_tree<T: FormattedTreeNode>(node: &T) -> Self {
         let (width, height) = get_tree_width_height(node);
 
@@ -597,7 +547,7 @@ impl RenderTree {
         result
     }
 
-    fn new(width: usize, height: usize) -> Self {
+    pub fn new(width: usize, height: usize) -> Self {
         RenderTree {
             nodes: vec![None; (width + 1) * (height + 1)],
             width,
@@ -614,7 +564,7 @@ impl RenderTree {
         self.nodes.get(pos).and_then(|node| node.clone())
     }
 
-    fn set_node(&mut self, x: usize, y: usize, node: Arc<RenderTreeNode>) {
+    pub fn set_node(&mut self, x: usize, y: usize, node: Arc<RenderTreeNode>) {
         let pos = self.get_position(x, y);
         if let Some(slot) = self.nodes.get_mut(pos) {
             *slot = Some(node);
@@ -634,31 +584,12 @@ impl RenderTree {
         y * self.width + x
     }
 
-    fn fmt_display_dyn<T: ?Sized + DisplayAs>(node: &T) -> impl fmt::Display + '_ {
+    pub fn fmt_display<T: ?Sized + DisplayAs>(node: &T) -> impl fmt::Display + '_ {
         struct Wrapper<'a, T: ?Sized + DisplayAs> {
             node: &'a T,
         }
 
-        impl<T> fmt::Display for Wrapper<'_, T>
-        where
-            T: ?Sized + DisplayAs,
-        {
-            fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-                self.node.fmt_as(DisplayFormatType::TreeRender, f)
-            }
-        }
-        Wrapper { node }
-    }
-
-    fn fmt_display<T: FormattedTreeNode>(node: &T) -> impl fmt::Display + '_ {
-        struct Wrapper<'a, T: FormattedTreeNode> {
-            node: &'a T,
-        }
-
-        impl<T: FormattedTreeNode> fmt::Display for Wrapper<'_, T>
-        where
-            T: FormattedTreeNode,
-        {
+        impl<T: ?Sized + DisplayAs> fmt::Display for Wrapper<'_, T> {
             fn fmt(&self, f: &mut Formatter) -> fmt::Result {
                 self.node.fmt_as(DisplayFormatType::TreeRender, f)
             }
@@ -694,25 +625,6 @@ pub fn get_tree_width_height<T: FormattedTreeNode>(plan: &T) -> (usize, usize) {
     *height += 1;
 
     (*width, *height)
-}
-
-pub fn get_dyn_tree_width_height<T: ?Sized + DynTreeNode + DisplayAs>(
-    plan: &T,
-) -> (usize, usize) {
-    let (mut width, mut height) = (0, 0);
-    let children = plan.arc_children();
-    if children.is_empty() {
-        return (1, 1);
-    }
-    for c in children {
-        let (child_width, child_height) = get_dyn_tree_width_height(c.as_ref());
-        width += child_width;
-        height = cmp::max(height, child_height);
-    }
-
-    height += 1;
-
-    (width, height)
 }
 
 /// Recursively builds the render tree structure.
@@ -754,7 +666,7 @@ pub fn create_tree_recursive<T: FormattedTreeNode>(
         *is_empty_ref = false;
         let child_x = x + *width_ref;
         let child_y = y + 1;
-        rendered_node.add_child_position(child_x, child_y);
+        rendered_node.add_child_position();
         *width_ref += create_tree_recursive(result, n, child_x, child_y);
         return Ok(TreeNodeRecursion::Continue);
     })
@@ -770,70 +682,9 @@ pub fn create_tree_recursive<T: FormattedTreeNode>(
     *width_ref
 }
 
-pub fn create_dyn_tree_recursive<T: ?Sized + DynTreeNode + DisplayAs>(
-    result: &mut RenderTree,
-    plan: &T,
-    x: usize,
-    y: usize,
-) -> usize {
-    let display_info = RenderTree::fmt_display_dyn(plan).to_string();
-    let mut extra_info = HashMap::new();
-
-    // Parse the key-value pairs from the formatted string.
-    // See DisplayFormatType::TreeRender for details
-    for line in display_info.lines() {
-        if let Some((key, value)) = line.split_once('=') {
-            extra_info.insert(key.to_string(), value.to_string());
-        } else {
-            extra_info.insert(line.to_string(), "".to_string());
-        }
-    }
-
-    let mut rendered_node = RenderTreeNode::new("todo".to_string(), extra_info);
-    let mut width = 0;
-    let children = plan.arc_children();
-    if children.is_empty() {
-        result.set_node(x, y, Arc::new(rendered_node));
-        return 1;
-    }
-    for c in children {
-        let child_x = x + width;
-        let child_y = y + 1;
-        rendered_node.add_child_position(child_x, child_y);
-        width += create_dyn_tree_recursive(result, c.as_ref(), child_x, child_y);
-    }
-
-    result.set_node(x, y, Arc::new(rendered_node));
-    width
-}
-
-pub fn dyn_tree_render<'a, T: ?Sized + DynTreeNode + DisplayAs>(
-    n: &'a T,
-) -> impl fmt::Display + 'a {
-    struct Wrapper<'a, T: ?Sized + DynTreeNode + DisplayAs> {
-        n: &'a T,
-    }
-    impl<T: ?Sized + DynTreeNode + DisplayAs> fmt::Display for Wrapper<'_, T> {
-        fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-            let mut visitor = TreeRenderVisitor { f };
-            visitor.visit_dyn(self.n)
-        }
-    }
-
-    Wrapper { n: n }
-}
-
 // render the whole tree
 pub fn tree_render<'a, T: FormattedTreeNode>(n: &'a T) -> impl fmt::Display + use<'a, T> {
-    struct Wrapper<'a, T: FormattedTreeNode> {
-        n: &'a T,
-    }
-    impl<T: FormattedTreeNode> fmt::Display for Wrapper<'_, T> {
-        fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-            let mut visitor = TreeRenderVisitor { f };
-            visitor.visit(self.n)
-        }
-    }
-
-    Wrapper { n: n }
+    let mut visitor = TreeRenderVisitor {};
+    let root = visitor.visit(n).unwrap();
+    root
 }
