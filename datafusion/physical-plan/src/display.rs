@@ -18,20 +18,17 @@
 //! Implementation of physical plan display. See
 //! [`crate::displayable`] for examples of how to format
 
-use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fmt::Formatter;
 
 use arrow::datatypes::SchemaRef;
 
-use datafusion_common::display::{
-    dyn_tree_render, tree_render, GraphvizBuilder, PlanType, StringifiedPlan,
-};
 pub use datafusion_common::display::{DisplayAs, DisplayFormatType};
+use datafusion_common::display::{GraphvizBuilder, PlanType, StringifiedPlan};
 use datafusion_expr::display_schema;
 use datafusion_physical_expr::LexOrdering;
 
-use crate::render_tree::{self, RenderTree};
+use crate::render_tree::tree_render;
 
 use super::{accept, ExecutionPlan, ExecutionPlanVisitor};
 
@@ -224,8 +221,8 @@ impl<'a> DisplayableExecutionPlan<'a> {
     /// Formats the plan using a ASCII art like tree
     ///
     /// See [`DisplayFormatType::TreeRender`] for more details.
-    pub fn tree_render(&'b self) -> impl fmt::Display + 'b {
-        dyn_tree_render(self.inner)
+    pub fn tree_render(&self) -> impl fmt::Display + 'a {
+        tree_render(self.inner)
     }
 
     /// Return a single-line summary of the root of the plan
