@@ -18,19 +18,17 @@
 //! Implementation of physical plan display. See
 //! [`crate::displayable`] for examples of how to format
 
-use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fmt::Formatter;
 
 use arrow::datatypes::SchemaRef;
 
-use datafusion_common::display::{
-    tree_render, DisplayAs, DisplayFormatType, GraphvizBuilder, PlanType, StringifiedPlan,
-};
+pub use datafusion_common::display::{DisplayAs, DisplayFormatType};
+use datafusion_common::display::{GraphvizBuilder, PlanType, StringifiedPlan};
 use datafusion_expr::display_schema;
 use datafusion_physical_expr::LexOrdering;
 
-use crate::render_tree::{self, RenderTree};
+use crate::render_tree::tree_render;
 
 use super::{accept, ExecutionPlan, ExecutionPlanVisitor};
 
