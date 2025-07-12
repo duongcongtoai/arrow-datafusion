@@ -1500,7 +1500,7 @@ impl OptimizerRule for DecorrelateDependentJoin {
 mod tests {
 
     use crate::decorrelate_dependent_join::DecorrelateDependentJoin;
-    use crate::test::test_table_scan_with_name;
+    use crate::test::{test_table_scan_with_name, test_table_with_columns};
     use crate::Optimizer;
     use crate::{
         assert_optimized_plan_eq_display_indent_snapshot, OptimizerConfig,
@@ -1524,7 +1524,7 @@ mod tests {
         let optimized_plan = optimizer
             .optimize(plan.clone(), &OptimizerContext::new(), |_, _| {})
             .expect("failed to optimize plan");
-        println!("result\n{}", optimized_plan.display_tree());
+        println!("{}", optimized_plan.display_tree());
     }
 
     macro_rules! assert_decorrelate {
@@ -2154,6 +2154,81 @@ mod tests {
     }
 
     #[test]
+    fn decorrelate_outer_join_with_both_side_correlated() -> Result<()> {
+        let t1 = test_table_scan_with_name("T1")?;
+        let t2 = test_table_scan_with_name("T2")?;
+        let t3 = test_table_scan_with_name("T3")?;
+        let t4 = test_table_scan_with_name("T4")?;
+        // to avoid column conflict
+        let t4_alias = LogicalPlanBuilder::from(t4.clone())
+            .alias("T4_alias")?
+            .build()?;
+        let t2_join_t4 = LogicalPlanBuilder::from(t2.clone())
+            .join(
+                t4.clone(),
+                JoinType::Inner,
+                (vec!["T2.b"], vec!["T4.b"]),
+                Some(col("T2.a").eq(out_ref_col(ArrowDataType::UInt32, "T1.a"))),
+            )?
+            .build()?;
+        let t3_join_t4 = LogicalPlanBuilder::from(t3.clone())
+            .join(
+                t4_alias.clone(),
+                JoinType::Inner,
+                (vec!["T3.b"], vec!["T4_alias.b"]),
+                Some(col("T3.a").eq(out_ref_col(ArrowDataType::UInt32, "T1.a"))),
+            )?
+            .build()?;
+
+        let sq_level1 = Arc::new(
+            LogicalPlanBuilder::from(t2_join_t4)
+                .join(
+                    t3_join_t4,
+                    JoinType::Full,
+                    (Vec::<Column>::new(), Vec::<Column>::new()),
+                    Some(col("T2.c").eq(out_ref_col(ArrowDataType::UInt32, "T1.a"))),
+                )?
+                .project(vec![count(col("T2.a"))])?
+                .build()?,
+        );
+
+        let plan = LogicalPlanBuilder::from(t1.clone())
+            .filter(
+                col("T1.a")
+                    .gt(lit(1))
+                    .and(in_subquery(col("T1.c"), sq_level1)),
+            )?
+            .build()?;
+        println!("{plan}");
+
+        // Projection: outer_table.a, outer_table.b, outer_table.c [a:UInt32, b:UInt32, c:UInt32]
+        //   Filter: outer_table.a > Int32(1) AND __in_sq_1.output [a:UInt32, b:UInt32, c:UInt32, output:Boolean]
+        //     DependentJoin on [outer_table.a lvl 1, outer_table.b lvl 1] with expr outer_table.c IN (<subquery>) depth 1 [a:UInt32, b:UInt32, c:UInt32, output:Boolean]
+        //       TableScan: outer_table [a:UInt32, b:UInt32, c:UInt32]
+        //       Projection: inner_table_lv1.b [b:UInt32]
+        //         Inner Join(ComparisonJoin):  Filter: inner_table_lv1.a = outer_ref(outer_table.a) AND outer_ref(outer_table.a) > inner_table_lv1.c AND inner_table_lv1.b = Int32(1) AND outer_ref(outer_table.b) = inner_table_lv1.b AND inner_table_lv1.a = inner_table_lv2.a [a:UInt32, b:UInt32, c:UInt32, a:UInt32, b:UInt32, c:UInt32]
+        //           TableScan: inner_table_lv1 [a:UInt32, b:UInt32, c:UInt32]
+        //           TableScan: inner_table_lv2 [a:UInt32, b:UInt32, c:UInt32]
+
+        assert_decorrelate!(plan, @r"
+        Projection: outer_table.a, outer_table.b, outer_table.c [a:UInt32, b:UInt32, c:UInt32]
+          Filter: outer_table.a > Int32(1) AND __in_sq_1.output [a:UInt32, b:UInt32, c:UInt32, __in_sq_1.output:Boolean]
+            Projection: outer_table.a, outer_table.b, outer_table.c, mark AS __in_sq_1.output [a:UInt32, b:UInt32, c:UInt32, __in_sq_1.output:Boolean]
+              LeftMark Join(ComparisonJoin):  Filter: outer_table.c = inner_table_lv1.b AND outer_table.a IS NOT DISTINCT FROM delim_scan_1.outer_table_a AND outer_table.b IS NOT DISTINCT FROM delim_scan_1.outer_table_b [a:UInt32, b:UInt32, c:UInt32, mark:Boolean]
+                TableScan: outer_table [a:UInt32, b:UInt32, c:UInt32]
+                Projection: inner_table_lv1.b, outer_table_dscan_1.outer_table_a, outer_table_dscan_1.outer_table_b [b:UInt32, outer_table_a:UInt32;N, outer_table_b:UInt32;N]
+                  Inner Join(ComparisonJoin):  Filter: inner_table_lv1.a = outer_table_dscan_1.outer_table_a AND outer_table_dscan_1.outer_table_a > inner_table_lv1.c AND inner_table_lv1.b = Int32(1) AND outer_table_dscan_1.outer_table_b = inner_table_lv1.b AND inner_table_lv1.a = inner_table_lv2.a [a:UInt32, b:UInt32, c:UInt32, outer_table_a:UInt32;N, outer_table_b:UInt32;N, a:UInt32, b:UInt32, c:UInt32]
+                    Inner Join(DelimJoin):  Filter: Boolean(true) [a:UInt32, b:UInt32, c:UInt32, outer_table_a:UInt32;N, outer_table_b:UInt32;N]
+                      TableScan: inner_table_lv1 [a:UInt32, b:UInt32, c:UInt32]
+                      SubqueryAlias: outer_table_dscan_1 [outer_table_a:UInt32;N, outer_table_b:UInt32;N]
+                        DelimGet: outer_table.a, outer_table.b [outer_table_a:UInt32;N, outer_table_b:UInt32;N]
+                    TableScan: inner_table_lv2 [a:UInt32, b:UInt32, c:UInt32]
+        ");
+
+        Ok(())
+    }
+
+    #[test]
     fn decorrelate_inner_join_left() -> Result<()> {
         let outer_table = test_table_scan_with_name("outer_table")?;
         let inner_table_lv1 = test_table_scan_with_name("inner_table_lv1")?;
@@ -2191,6 +2266,7 @@ mod tests {
                     .and(in_subquery(col("outer_table.c"), sq_level1)),
             )?
             .build()?;
+        println!("{plan}");
 
         // Projection: outer_table.a, outer_table.b, outer_table.c [a:UInt32, b:UInt32, c:UInt32]
         //   Filter: outer_table.a > Int32(1) AND __in_sq_1.output [a:UInt32, b:UInt32, c:UInt32, output:Boolean]
@@ -2338,6 +2414,74 @@ mod tests {
                           TableScan: inner_table [a:UInt32, b:UInt32, c:UInt32]
                           SubqueryAlias: outer_table_dscan_1 [outer_table_a:UInt32;N]
                             DelimGet: outer_table.a [outer_table_a:UInt32;N]
+        ");
+
+        Ok(())
+    }
+    #[test]
+    fn decorrelate_scalar_subquery_in_select() -> Result<()> {
+        // Test case for: SELECT t1_id, (SELECT sum(t2_int) FROM t2 WHERE t2.t2_id = t1.t1_id) as t2_sum from t1
+
+        // Create test tables
+        let t1 = test_table_with_columns(
+            "t1",
+            &[
+                ("t1_id", ArrowDataType::UInt32),
+                ("t1_name", ArrowDataType::Utf8),
+                ("t1_int", ArrowDataType::Int32),
+            ],
+        )?;
+
+        let t2 = test_table_with_columns(
+            "t2",
+            &[
+                ("t2_id", ArrowDataType::UInt32),
+                ("t2_int", ArrowDataType::Int32),
+                ("t2_value", ArrowDataType::Utf8),
+            ],
+        )?;
+
+        // Create the scalar subquery: SELECT sum(t2_int) FROM t2 WHERE t2.t2_id = t1.t1_id
+        let scalar_sq = Arc::new(
+            LogicalPlanBuilder::from(t2)
+                .filter(
+                    col("t2.t2_id").eq(out_ref_col(ArrowDataType::UInt32, "t1.t1_id")),
+                )?
+                .aggregate(Vec::<Expr>::new(), vec![sum(col("t2_int"))])?
+                .build()?,
+        );
+
+        // Create the main query plan: SELECT t1_id, (subquery) as t2_sum FROM t1
+        let plan = LogicalPlanBuilder::from(t1)
+            .project(vec![
+                col("t1_id"),
+                scalar_subquery(scalar_sq).alias("t2_sum"),
+            ])?
+            .build()?;
+
+        // Projection: t1.t1_id, __scalar_sq_1.output AS t2_sum [t1_id:UInt32, t2_sum:Int64]
+        //   DependentJoin on [t1.t1_id lvl 1] with expr (<subquery>) depth 1 [t1_id:UInt32, t1_name:Utf8, t1_int:Int32, output:Int64]
+        //     TableScan: t1 [t1_id:UInt32, t1_name:Utf8, t1_int:Int32]
+        //     Aggregate: groupBy=[[]], aggr=[[sum(t2.t2_int)]] [sum(t2.t2_int):Int64;N]
+        //       Filter: t2.t2_id = outer_ref(t1.t1_id) [t2_id:UInt32, t2_int:Int32, t2_value:Utf8]
+        //         TableScan: t2 [t2_id:UInt32, t2_int:Int32, t2_value:Utf8]
+
+        assert_decorrelate!(plan, @r"
+        Projection: t1.t1_id, __scalar_sq_1.output AS t2_sum [t1_id:UInt32, t2_sum:Int64]
+          Projection: t1.t1_id, t1.t1_name, t1.t1_int, sum(t2.t2_int), t1_dscan_2.t1_t1_id, sum(t2.t2_int) AS __scalar_sq_1.output [t1_id:UInt32, t1_name:Utf8, t1_int:Int32, sum(t2.t2_int):Int64;N, t1_t1_id:UInt32;N, __scalar_sq_1.output:Int64;N]
+            Left Join(ComparisonJoin):  Filter: t1.t1_id IS NOT DISTINCT FROM delim_scan_2.t1_t1_id [t1_id:UInt32, t1_name:Utf8, t1_int:Int32, sum(t2.t2_int):Int64;N, t1_t1_id:UInt32;N]
+              TableScan: t1 [t1_id:UInt32, t1_name:Utf8, t1_int:Int32]
+              Projection: sum(t2.t2_int), t1_dscan_2.t1_t1_id [sum(t2.t2_int):Int64;N, t1_t1_id:UInt32;N]
+                Inner Join(DelimJoin):  Filter: t1_dscan_2.t1_t1_id IS NOT DISTINCT FROM t1_dscan_1.t1_t1_id [sum(t2.t2_int):Int64;N, t1_t1_id:UInt32;N, t1_t1_id:UInt32;N]
+                  Projection: sum(t2.t2_int), t1_dscan_2.t1_t1_id [sum(t2.t2_int):Int64;N, t1_t1_id:UInt32;N]
+                    Aggregate: groupBy=[[t1_dscan_2.t1_t1_id]], aggr=[[sum(t2.t2_int)]] [t1_t1_id:UInt32;N, sum(t2.t2_int):Int64;N]
+                      Filter: t2.t2_id = t1_dscan_2.t1_t1_id [t2_id:UInt32, t2_int:Int32, t2_value:Utf8, t1_t1_id:UInt32;N]
+                        Inner Join(DelimJoin):  Filter: Boolean(true) [t2_id:UInt32, t2_int:Int32, t2_value:Utf8, t1_t1_id:UInt32;N]
+                          TableScan: t2 [t2_id:UInt32, t2_int:Int32, t2_value:Utf8]
+                          SubqueryAlias: t1_dscan_2 [t1_t1_id:UInt32;N]
+                            DelimGet: t1.t1_id [t1_t1_id:UInt32;N]
+                  SubqueryAlias: t1_dscan_1 [t1_t1_id:UInt32;N]
+                    DelimGet: t1.t1_id [t1_t1_id:UInt32;N]
         ");
 
         Ok(())
