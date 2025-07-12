@@ -20,8 +20,7 @@ use crate::optimizer::Optimizer;
 use crate::{OptimizerContext, OptimizerRule};
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::{assert_contains, Result};
-use datafusion_expr::CorrelatedColumnInfo;
+use datafusion_common::{assert_contains, Column, Result};
 use datafusion_expr::{logical_plan::table_scan, LogicalPlan, LogicalPlanBuilder};
 use std::sync::Arc;
 
@@ -47,7 +46,7 @@ pub fn test_table_scan() -> Result<LogicalPlan> {
 }
 
 pub fn test_delim_scan_with_name(
-    correlated_columns: Vec<CorrelatedColumnInfo>,
+    correlated_columns: Vec<(Column, DataType)>,
 ) -> Result<LogicalPlan> {
     LogicalPlanBuilder::delim_get(&correlated_columns)?.build()
 }
