@@ -400,7 +400,7 @@ impl LogicalPlanBuilder {
         Self::scan_with_filters(table_name, table_source, projection, vec![])
     }
 
-    pub fn delim_get(correlated_columns: &Vec<CorrelatedColumnInfo>) -> Result<Self> {
+    pub fn delim_get(correlated_columns: &Vec<(Column, DataType)>) -> Result<Self> {
         Ok(Self::new(LogicalPlan::DelimGet(DelimGet::try_new(
             correlated_columns,
         )?)))

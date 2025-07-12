@@ -329,7 +329,7 @@ pub struct DelimGet {
 }
 
 impl DelimGet {
-    pub fn try_new(correlated_columns: &Vec<CorrelatedColumnInfo>) -> Result<Self> {
+    pub fn try_new(correlated_columns: &Vec<(Column, DataType)>) -> Result<Self> {
         if correlated_columns.is_empty() {
             // return plan_err!("failed to construct DelimGet: empty correlated columns");
             // TODO: revisit if dummy dependent join is nesessary.
@@ -361,11 +361,11 @@ impl DelimGet {
         //     .collect();
 
         // Extract the first table reference to validate all columns come from the same table
-        let first_table_ref = correlated_columns[0].col.relation.clone();
+        let first_table_ref = correlated_columns[0].0.relation.clone();
 
         // Validate all columns come from the same table
         for column_info in correlated_columns.into_iter() {
-            if column_info.col.relation != first_table_ref {
+            if column_info.0.relation != first_table_ref {
                 return internal_err!(
                 "DelimGet requires all columns to be from the same table, found mixed table references");
             }
@@ -382,17 +382,14 @@ impl DelimGet {
             correlated_columns
                 .iter()
                 .map(|c| {
-                    let field = Field::new(
-                        c.col.flat_name().replace(".", "_"),
-                        c.data_type.clone(),
-                        true,
-                    );
+                    let field =
+                        Field::new(c.0.flat_name().replace(".", "_"), c.1.clone(), true);
                     (Some(table_name.clone()), Arc::new(field))
                 })
                 .collect();
 
         let columns: Vec<Column> =
-            correlated_columns.iter().map(|c| c.col.clone()).collect();
+            correlated_columns.iter().map(|c| c.0.clone()).collect();
 
         let schema = DFSchema::new_with_metadata(qualified_fields, HashMap::new())?;
 
