@@ -24,14 +24,17 @@ use std::sync::Arc;
 
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_common::{internal_datafusion_err, internal_err, Column, Result};
-use datafusion_expr::expr::{self, Exists, InSubquery};
+use datafusion_expr::expr::{
+    self, Exists, InSubquery, WindowFunction, WindowFunctionParams,
+};
 use datafusion_expr::utils::conjunction;
 use datafusion_expr::{
     binary_expr, col, lit, not, when, Aggregate, BinaryExpr, CorrelatedColumnInfo,
-    DependentJoin, Expr, Join, JoinType, LogicalPlan, LogicalPlanBuilder, Operator,
-    Projection,
+    DependentJoin, Expr, FetchType, Join, JoinType, LogicalPlan, LogicalPlanBuilder,
+    Operator, Projection, SkipType, WindowFrame, WindowFunctionDefinition,
 };
 
+use datafusion_functions_window::row_number::row_number_udwf;
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
 
@@ -1000,8 +1003,260 @@ impl DependentJoinDecorrelator {
                     false,
                 );
             }
-            other => {
-                unimplemented!("implement pushdown dependent join for node {other}")
+            LogicalPlan::Limit(old_limit) => {
+                let mut sort = None;
+
+                // Check if the direct child of this LIMIT node is an ORDER BY node, if so, keep is
+                // separate. This is done for an optimization to avoid having to compute the total
+                // order.
+                let new_input = if let LogicalPlan::Sort(child) = old_limit.input.as_ref()
+                {
+                    sort = Some(old_limit.input.as_ref().clone());
+                    self.push_down_dependent_join_internal(
+                        &child.input,
+                        parent_propagate_nulls,
+                        lateral_depth,
+                    )?
+                } else {
+                    self.push_down_dependent_join_internal(
+                        &old_limit.input,
+                        parent_propagate_nulls,
+                        lateral_depth,
+                    )?
+                };
+
+                let new_input_cols = new_input.schema().columns().clone();
+
+                // We push a row_number() OVER (PARTITION BY [correlated columns])
+                // TODO: take perform delim into consideration
+                let mut partition_by = vec![];
+                let partition_count = self.domains.len();
+                for i in 0..partition_count {
+                    if let Some(corr_col) = self.domains.get_index(i) {
+                        let delim_col = Self::rewrite_into_delim_column(
+                            &self.correlated_column_to_delim_column,
+                            &corr_col.col,
+                        )?;
+                        partition_by.push(Expr::Column(delim_col));
+                    }
+                }
+
+                let order_by = if let Some(LogicalPlan::Sort(sort)) = &sort {
+                    // Optimization: if there is an ORDER BY node followed by a LIMIT rather than
+                    // computing the entire order, we push the ORDER BY expressions into the
+                    // row_num computation. This way the order only needs to be computed per
+                    // partition.
+                    sort.expr.clone()
+                } else {
+                    vec![]
+                };
+
+                // Create row_number() window function.
+                let row_number_expr = Expr::WindowFunction(Box::new(WindowFunction {
+                    fun: WindowFunctionDefinition::WindowUDF(row_number_udwf()),
+                    params: WindowFunctionParams {
+                        args: vec![],
+                        partition_by,
+                        order_by,
+                        window_frame: WindowFrame::new(Some(false)),
+                        null_treatment: None,
+                    },
+                }))
+                .alias("row_number");
+                let mut window_exprs = vec![];
+                window_exprs.push(row_number_expr);
+
+                let window = LogicalPlanBuilder::new(new_input)
+                    .window(window_exprs)?
+                    .build()?;
+
+                // Add filter based on row_number
+                // the filter we add is "row_number > offset AND row_number <= offset + limit"
+                let mut filter_conditions = vec![];
+
+                if let FetchType::Literal(Some(fetch)) = old_limit.get_fetch_type()? {
+                    let upper_bound =
+                        if let SkipType::Literal(skip) = old_limit.get_skip_type()? {
+                            // Both offset and limit specified - upper bound is offset + limit.
+                            fetch + skip
+                        } else {
+                            // No offset - upper bound is not only the limit.
+                            fetch
+                        };
+
+                    filter_conditions
+                        .push(col("row_number").lt_eq(lit(upper_bound as i64)));
+                }
+
+                // We only need to add "row_number >= offset + 1" if offset is bigger than 0.
+
+                if let SkipType::Literal(skip) = old_limit.get_skip_type()? {
+                    if skip > 0 {
+                        filter_conditions.push(col("row_number").gt(lit(skip as i64)));
+                    }
+                }
+
+                let mut result_plan = window;
+                if !filter_conditions.is_empty() {
+                    let filter_expr = filter_conditions
+                        .into_iter()
+                        .reduce(|acc, expr| acc.and(expr))
+                        .unwrap();
+
+                    result_plan = LogicalPlanBuilder::new(result_plan)
+                        .filter(filter_expr)?
+                        .build()?;
+                }
+
+                // Project away the row_number column, keeping only original columns
+                let final_exprs = new_input_cols
+                    .iter()
+                    .map(|c| col(c.clone()))
+                    .collect::<Vec<_>>();
+                result_plan = LogicalPlanBuilder::new(result_plan)
+                    .project(final_exprs)?
+                    .build()?;
+
+                return Ok(result_plan);
+            }
+            LogicalPlan::Distinct(old_distinct) => {
+                // Push down into child.
+                let new_input = self.push_down_dependent_join(
+                    old_distinct.input().as_ref(),
+                    parent_propagate_nulls,
+                    lateral_depth,
+                )?;
+                // Add all correlated columns to the DISTINCT targets.
+                let mut distinct_exprs = old_distinct
+                    .input()
+                    .schema()
+                    .columns()
+                    .into_iter()
+                    .map(|c| col(c.clone()))
+                    .collect::<Vec<_>>();
+
+                // Add correlated columns as additional columns for grouping
+                for domain_col in self.domains.iter() {
+                    let delim_col = Self::rewrite_into_delim_column(
+                        &self.correlated_column_to_delim_column,
+                        &domain_col.col,
+                    )?;
+                    distinct_exprs.push(col(delim_col));
+                }
+
+                // Create new distinct plan with additional correlated columns
+                let distinct = LogicalPlanBuilder::new(new_input)
+                    .distinct_on(distinct_exprs, vec![], None)?
+                    .build()?;
+
+                return Ok(distinct);
+            }
+            LogicalPlan::Sort(old_sort) => {
+                let new_input = self.push_down_dependent_join(
+                    old_sort.input.as_ref(),
+                    parent_propagate_nulls,
+                    lateral_depth,
+                )?;
+                let mut sort = old_sort.clone();
+                sort.input = Arc::new(new_input);
+                Ok(LogicalPlan::Sort(sort))
+            }
+            LogicalPlan::TableScan(old_table_scan) => {
+                let delim_scan = self.build_delim_scan()?;
+
+                // Add correlated columns to the table scan output
+                let mut projection_exprs: Vec<Expr> = old_table_scan
+                    .projected_schema
+                    .columns()
+                    .into_iter()
+                    .map(|c| Expr::Column(c))
+                    .collect();
+
+                // Add delim columns to projection
+                for domain_col in self.domains.iter() {
+                    let delim_col = Self::rewrite_into_delim_column(
+                        &self.correlated_column_to_delim_column,
+                        &domain_col.col,
+                    )?;
+                    projection_exprs.push(Expr::Column(delim_col));
+                }
+
+                // Cross join with delim scan and project
+                let cross_join = LogicalPlanBuilder::new(LogicalPlan::TableScan(
+                    old_table_scan.clone(),
+                ))
+                .join(
+                    delim_scan,
+                    JoinType::Inner,
+                    (Vec::<Column>::new(), Vec::<Column>::new()),
+                    None,
+                )?
+                .project(projection_exprs)?
+                .build()?;
+
+                // Rewrite correlated expressions
+                Self::rewrite_outer_ref_columns(
+                    cross_join,
+                    &self.correlated_column_to_delim_column,
+                    false,
+                )
+            }
+            LogicalPlan::Window(old_window) => {
+                // Push into children.
+                let new_input = self.push_down_dependent_join_internal(
+                    &old_window.input,
+                    parent_propagate_nulls,
+                    lateral_depth,
+                )?;
+
+                // Create new window expressions with updated partition clauses
+                let mut new_window_exprs = old_window.window_expr.clone();
+
+                // Add correlated columns to PARTITION BY clauses in each window expression
+                for window_expr in &mut new_window_exprs {
+                    // Handle both direct window functions and aliased window functions
+                    let window_func = match window_expr {
+                        Expr::WindowFunction(ref mut window_func) => window_func,
+                        Expr::Alias(alias) => {
+                            if let Expr::WindowFunction(ref mut window_func) =
+                                alias.expr.as_mut()
+                            {
+                                window_func
+                            } else {
+                                continue; // Skip if alias doesn't contain a window function
+                            }
+                        }
+                        _ => continue, // Skip non-window expressions
+                    };
+
+                    // Add correlated columns to the partition by clause
+                    for domain_col in self.domains.iter() {
+                        let delim_col = Self::rewrite_into_delim_column(
+                            &self.correlated_column_to_delim_column,
+                            &domain_col.col,
+                        )?;
+                        window_func
+                            .params
+                            .partition_by
+                            .push(Expr::Column(delim_col));
+                    }
+                }
+
+                // Create new window plan with updated expressions and input
+                let mut window = old_window.clone();
+                window.input = Arc::new(new_input);
+                window.window_expr = new_window_exprs;
+
+                // We replace any correlated expressions with the corresponding entry in the
+                // correlated_map.
+                Self::rewrite_outer_ref_columns(
+                    LogicalPlan::Window(window),
+                    &self.correlated_column_to_delim_column,
+                    false,
+                )
+            }
+            plan_ => {
+                unimplemented!("implement pushdown dependent join for node {plan_}")
             }
         }
     }
@@ -1239,12 +1494,14 @@ mod tests {
     };
     use arrow::datatypes::DataType as ArrowDataType;
     use datafusion_common::{Column, Result};
-    use datafusion_expr::JoinType;
+    use datafusion_expr::expr::{WindowFunction, WindowFunctionParams};
     use datafusion_expr::{
         exists, expr_fn::col, in_subquery, lit, out_ref_col, scalar_subquery, Expr,
         LogicalPlan, LogicalPlanBuilder,
     };
+    use datafusion_expr::{JoinType, WindowFrame, WindowFunctionDefinition};
     use datafusion_functions_aggregate::{count::count, sum::sum};
+    use datafusion_functions_window::row_number::row_number_udwf;
     use std::sync::Arc;
     fn print_optimize_tree(plan: &LogicalPlan) {
         let rule: Arc<dyn OptimizerRule + Send + Sync> =
@@ -1849,6 +2106,130 @@ mod tests {
                       SubqueryAlias: outer_table_dscan_1 [outer_table_a:UInt32;N, outer_table_b:UInt32;N]
                         DelimGet: outer_table.a, outer_table.b [outer_table_a:UInt32;N, outer_table_b:UInt32;N]
                     TableScan: inner_table_lv2 [a:UInt32, b:UInt32, c:UInt32]
+        ");
+
+        Ok(())
+    }
+
+    #[test]
+    fn decorrelate_in_subquery_with_sort_limit() -> Result<()> {
+        let outer_table = test_table_scan_with_name("customers")?;
+        let inner_table = test_table_scan_with_name("orders")?;
+
+        let in_subquery_plan = Arc::new(
+            LogicalPlanBuilder::from(inner_table)
+                .filter(
+                    col("orders.a")
+                        .eq(out_ref_col(ArrowDataType::UInt32, "customers.a"))
+                        .and(col("orders.b").eq(lit(1))), // status = 'completed' simplified as b = 1
+                )?
+                .sort(vec![col("orders.c").sort(false, true)])? // ORDER BY order_amount DESC
+                .limit(0, Some(3))? // LIMIT 3
+                .project(vec![col("orders.c")])?
+                .build()?,
+        );
+
+        // Outer query
+        let plan = LogicalPlanBuilder::from(outer_table.clone())
+            .filter(
+                col("customers.a")
+                    .gt(lit(100))
+                    .and(in_subquery(col("customers.a"), in_subquery_plan)),
+            )?
+            .build()?;
+
+        // Projection: customers.a, customers.b, customers.c
+        //       Filter: customers.a > Int32(100) AND __in_sq_1.output
+        //         DependentJoin on [customers.a lvl 1] with expr customers.a IN (<subquery>) depth 1
+        //           TableScan: customers
+        //           Projection: orders.c
+        //             Limit: skip=0, fetch=3
+        //               Sort: orders.c DESC NULLS FIRST
+        //                 Filter: orders.a = outer_ref(customers.a) AND orders.b = Int32(1)
+        //                   TableScan: orders
+
+        assert_decorrelate!(plan, @r"
+           Projection: customers.a, customers.b, customers.c [a:UInt32, b:UInt32, c:UInt32]
+             Filter: customers.a > Int32(100) AND __in_sq_1.output [a:UInt32, b:UInt32, c:UInt32, __in_sq_1.output:Boolean]
+               Projection: customers.a, customers.b, customers.c, mark AS __in_sq_1.output [a:UInt32, b:UInt32, c:UInt32, __in_sq_1.output:Boolean]
+                 LeftMark Join(ComparisonJoin):  Filter: customers.a = orders.c AND customers.a IS NOT DISTINCT FROM delim_scan_1.customers_a [a:UInt32, b:UInt32, c:UInt32, mark:Boolean]
+                   TableScan: customers [a:UInt32, b:UInt32, c:UInt32]
+                   Projection: orders.c, customers_dscan_1.customers_a [c:UInt32, customers_a:UInt32;N]
+                     Projection: orders.a, orders.b, orders.c, customers_dscan_1.customers_a [a:UInt32, b:UInt32, c:UInt32, customers_a:UInt32;N]
+                       Filter: row_number <= Int64(3) [a:UInt32, b:UInt32, c:UInt32, customers_a:UInt32;N, row_number:UInt64]
+                         WindowAggr: windowExpr=[[row_number() PARTITION BY [customers_dscan_1.customers_a] ORDER BY [orders.c DESC NULLS FIRST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS row_number]] [a:UInt32, b:UInt32, c:UInt32, customers_a:UInt32;N, row_number:UInt64]
+                           Filter: orders.a = customers_dscan_1.customers_a AND orders.b = Int32(1) [a:UInt32, b:UInt32, c:UInt32, customers_a:UInt32;N]
+                             Inner Join(DelimJoin):  Filter: Boolean(true) [a:UInt32, b:UInt32, c:UInt32, customers_a:UInt32;N]
+                               TableScan: orders [a:UInt32, b:UInt32, c:UInt32]
+                               SubqueryAlias: customers_dscan_1 [customers_a:UInt32;N]
+                                 DelimGet: customers.a [customers_a:UInt32;N]
+            ");
+
+        Ok(())
+    }
+
+    #[test]
+    fn decorrelate_subquery_with_window_function() -> Result<()> {
+        let outer_table = test_table_scan_with_name("outer_table")?;
+        let inner_table = test_table_scan_with_name("inner_table")?;
+
+        // Create a subquery with window function
+        let window_expr = Expr::WindowFunction(Box::new(WindowFunction {
+            fun: WindowFunctionDefinition::WindowUDF(row_number_udwf()),
+            params: WindowFunctionParams {
+                args: vec![],
+                partition_by: vec![col("inner_table.b")],
+                order_by: vec![col("inner_table.c").sort(false, true)],
+                window_frame: WindowFrame::new(Some(false)),
+                null_treatment: None,
+            },
+        }))
+        .alias("row_num");
+
+        let subquery = Arc::new(
+            LogicalPlanBuilder::from(inner_table)
+                .filter(
+                    col("inner_table.a")
+                        .eq(out_ref_col(ArrowDataType::UInt32, "outer_table.a")),
+                )?
+                .window(vec![window_expr])?
+                .filter(col("row_num").eq(lit(1)))?
+                .project(vec![col("inner_table.b")])?
+                .build()?,
+        );
+
+        let plan = LogicalPlanBuilder::from(outer_table)
+            .filter(
+                col("outer_table.a")
+                    .gt(lit(1))
+                    .and(in_subquery(col("outer_table.c"), subquery)),
+            )?
+            .build()?;
+
+        // Projection: outer_table.a, outer_table.b, outer_table.c
+        //   Filter: outer_table.a > Int32(1) AND __in_sq_1.output
+        //     DependentJoin on [outer_table.a lvl 1] with expr outer_table.c IN (<subquery>) depth 1
+        //       TableScan: outer_table
+        //       Projection: inner_table.b
+        //         Filter: row_num = Int32(1)
+        //           WindowAggr: windowExpr=[[row_number() PARTITION BY [inner_table.b] ORDER BY [inner_table.c DESC NULLS FIRST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS row_num]]
+        //             Filter: inner_table.a = outer_ref(outer_table.a)
+        //               TableScan: inner_table
+
+        assert_decorrelate!(plan, @r"
+        Projection: outer_table.a, outer_table.b, outer_table.c [a:UInt32, b:UInt32, c:UInt32]
+          Filter: outer_table.a > Int32(1) AND __in_sq_1.output [a:UInt32, b:UInt32, c:UInt32, __in_sq_1.output:Boolean]
+            Projection: outer_table.a, outer_table.b, outer_table.c, mark AS __in_sq_1.output [a:UInt32, b:UInt32, c:UInt32, __in_sq_1.output:Boolean]
+              LeftMark Join(ComparisonJoin):  Filter: outer_table.c = inner_table.b AND outer_table.a IS NOT DISTINCT FROM delim_scan_1.outer_table_a [a:UInt32, b:UInt32, c:UInt32, mark:Boolean]
+                TableScan: outer_table [a:UInt32, b:UInt32, c:UInt32]
+                Projection: inner_table.b, outer_table_dscan_1.outer_table_a [b:UInt32, outer_table_a:UInt32;N]
+                  Filter: row_num = Int32(1) [a:UInt32, b:UInt32, c:UInt32, outer_table_a:UInt32;N, row_num:UInt64]
+                    WindowAggr: windowExpr=[[row_number() PARTITION BY [inner_table.b, outer_table_dscan_1.outer_table_a] ORDER BY [inner_table.c DESC NULLS FIRST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS row_num]] [a:UInt32, b:UInt32, c:UInt32, outer_table_a:UInt32;N, row_num:UInt64]
+                      Filter: inner_table.a = outer_table_dscan_1.outer_table_a [a:UInt32, b:UInt32, c:UInt32, outer_table_a:UInt32;N]
+                        Inner Join(DelimJoin):  Filter: Boolean(true) [a:UInt32, b:UInt32, c:UInt32, outer_table_a:UInt32;N]
+                          TableScan: inner_table [a:UInt32, b:UInt32, c:UInt32]
+                          SubqueryAlias: outer_table_dscan_1 [outer_table_a:UInt32;N]
+                            DelimGet: outer_table.a [outer_table_a:UInt32;N]
         ");
 
         Ok(())
