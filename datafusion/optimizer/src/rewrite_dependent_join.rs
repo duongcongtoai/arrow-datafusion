@@ -109,7 +109,7 @@ impl DependentJoinRewriter {
                             subquery_expr_by_offset.insert(*offset_ref, e);
                             *offset_ref += 1;
 
-                            Ok(Transformed::yes(col(format!("{alias}.output"))))
+                            Ok(Transformed::yes(col(format!("{alias}_output"))))
                         })?
                         .data)
                 })
@@ -207,7 +207,7 @@ impl DependentJoinRewriter {
         current_plan: LogicalPlanBuilder,
         subquery_alias_by_offset: HashMap<usize, String>,
     ) -> Result<LogicalPlanBuilder> {
-        let (transformed_plan, mut transformed_exprs) =
+        let (transformed_plan, transformed_exprs) =
             Self::rewrite_exprs_into_dependent_join_plan(
                 vec![original_proj.expr.iter().collect::<Vec<&Expr>>()],
                 dependent_join_node,
@@ -215,24 +215,10 @@ impl DependentJoinRewriter {
                 current_plan,
                 subquery_alias_by_offset,
             )?;
-        let mut transformed_proj_exprs =
-            transformed_exprs.pop().ok_or(internal_datafusion_err!(
+        let transformed_proj_exprs =
+            transformed_exprs.first().ok_or(internal_datafusion_err!(
                 "transform projection expr does not return 1 element"
             ))?;
-        // dependent join will introduce intermediate columns representing the evaluation
-        // of the subquery, which do not respect the column name of the original projection plan
-        // we have to rename them back
-        for (transformed_expr, expected_column) in transformed_proj_exprs
-            .iter_mut()
-            .zip(original_proj.schema.columns())
-        {
-            if let Expr::Column(col) = transformed_expr {
-                if col != &expected_column {
-                    *transformed_expr =
-                        transformed_expr.clone().alias(expected_column.name())
-                }
-            }
-        }
         transformed_plan.project(transformed_proj_exprs.clone())
     }
 
