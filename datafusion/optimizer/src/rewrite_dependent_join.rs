@@ -109,7 +109,7 @@ impl DependentJoinRewriter {
                             subquery_expr_by_offset.insert(*offset_ref, e);
                             *offset_ref += 1;
 
-                            Ok(Transformed::yes(col(format!("{alias}.output"))))
+                            Ok(Transformed::yes(col(format!("{alias}_output"))))
                         })?
                         .data)
                 })
@@ -648,6 +648,7 @@ impl TreeNodeRewriter for DependentJoinRewriter {
                     self.conclude_lowest_dependent_join_node_if_any(new_id, col)
                 })?;
             }
+            LogicalPlan::Unnest(_unnest) => {}
             LogicalPlan::Projection(proj) => {
                 for expr in &proj.expr {
                     if contains_subquery(expr) {
