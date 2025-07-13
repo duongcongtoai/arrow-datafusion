@@ -227,16 +227,11 @@ impl DependentJoinDecorrelator {
                 // TODO: fix me
                 self.decorrelate_independent(left)?
             } else {
-                let new_left = self.push_down_dependent_join(
+                self.push_down_dependent_join(
                     left,
                     parent_propagate_nulls,
                     lateral_depth,
-                )?;
-                println!(
-                    "Troubleshoot correlated map {:?}",
-                    self.correlated_column_to_delim_column
-                );
-                new_left
+                )?
             };
 
             // TODO: duckdb does this redundant rewrite for no reason???
@@ -2524,6 +2519,8 @@ mod tests {
             ])?
             .build()?;
         plan.clone().recompute_schema()?;
+        let child = (*plan.inputs().get(0).unwrap()).clone();
+        child.recompute_schema()?;
 
         // Projection: t1.t1_id, __scalar_sq_1.output AS t2_sum [t1_id:UInt32, t2_sum:Int64]
         //   DependentJoin on [t1.t1_id lvl 1] with expr (<subquery>) depth 1 [t1_id:UInt32, t1_name:Utf8, t1_int:Int32, output:Int64]
