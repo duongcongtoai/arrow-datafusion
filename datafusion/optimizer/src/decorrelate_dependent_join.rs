@@ -1586,7 +1586,6 @@ mod tests {
         }};
     }
 
-    // TODO: This test is failing
     #[test]
     fn correlated_subquery_nested_in_uncorrelated_subquery() -> Result<()> {
         let t1 = test_table_scan_with_name("t1")?;
@@ -1607,7 +1606,27 @@ mod tests {
         let plan = LogicalPlanBuilder::from(t1.clone())
             .filter(exists(sq1))?
             .build()?;
-        println!("{plan}");
+        // Filter: EXISTS (<subquery>)
+        //   Subquery:
+        //     Filter: EXISTS (<subquery>)
+        //       Subquery:
+        //         Filter: t3.b = outer_ref(t2.b)
+        //           TableScan: t3
+        //       TableScan: t2
+        //   TableScan: t1
+
+        // dependent join plan
+        // Projection: t1.a, t1.b, t1.c
+        //   Filter: __exists_sq_2_output
+        //     DependentJoin on [] with expr EXISTS (<subquery>) depth 1
+        //       TableScan: t1
+        //       Projection: t2.a, t2.b, t2.c
+        //         Filter: __exists_sq_1_output
+        //           DependentJoin on [t2.b lvl 2] with expr EXISTS (<subquery>) depth 2
+        //             TableScan: t2
+        //             Filter: t3.b = outer_ref(t2.b)
+        //               TableScan: t3
+
         assert_decorrelate!(plan, @r"
         Projection: t1.a, t1.b, t1.c [a:UInt32, b:UInt32, c:UInt32]
           Filter: __exists_sq_2_output [a:UInt32, b:UInt32, c:UInt32, __exists_sq_2_output:Boolean]
