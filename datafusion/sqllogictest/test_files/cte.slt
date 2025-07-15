@@ -1006,10 +1006,3 @@ explain WITH RECURSIVE numbers AS (
   UNION ALL
   select n + 1 FROM numbers WHERE N < 10
 ) select * from numbers;
-
-select * from t1
-where (
-  with cte as (select * from t2
-  where t2.id2<t1.id1)
-  select count(*) from cte c1 join cte c2 on c1.id2=c2.id2
-) =1;
