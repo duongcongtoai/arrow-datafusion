@@ -626,6 +626,7 @@ impl DependentJoinDecorrelator {
 
         if !has_correlated_expr {
             match node {
+                // exit projection
                 LogicalPlan::Projection(old_proj) => {
                     let mut proj = old_proj.clone();
 
@@ -1584,6 +1585,67 @@ mod tests {
                 @ $expected,
             )?;
         }};
+    }
+
+    #[test]
+    fn exit_projection_and_projection_expr_contains_uncorrlelated_complex_subquery(
+    ) -> Result<()> {
+        let t1 = test_table_scan_with_name("t1")?;
+        let t2 = test_table_scan_with_name("t2")?;
+        let t3 = test_table_scan_with_name("t3")?;
+
+        let sq2 = Arc::new(
+            LogicalPlanBuilder::from(t3.clone())
+                .filter(col("t3.b").eq(out_ref_col(ArrowDataType::UInt32, "t2.a")))?
+                .build()?,
+        );
+        let sq1 = Arc::new(
+            LogicalPlanBuilder::from(t2.clone())
+                .filter(exists(sq2))?
+                // this is where exit_projection happens
+                .project(vec![col("t2.a")])?
+                .filter(col("t2.a").eq(out_ref_col(ArrowDataType::UInt32, "t1.a")))?
+                .build()?,
+        );
+
+        let plan = LogicalPlanBuilder::from(t1.clone())
+            .project(vec![col("t1.a"), exists(sq1)])?
+            .build()?;
+        // dependent join plan
+        // Projection: t1.a, __exists_sq_2_output AS EXISTS
+        //   DependentJoin on [t1.a lvl 1] with expr EXISTS (<subquery>) depth 1
+        //     TableScan: t1
+        //     Filter: t2.a = outer_ref(t1.a)
+        //       Projection: t2.a
+        //         Projection: t2.a, t2.b, t2.c
+        //           Filter: __exists_sq_1_output
+        //             DependentJoin on [t2.a lvl 2] with expr EXISTS (<subquery>) depth 2
+        //               TableScan: t2
+        //               Filter: t3.b = outer_ref(t2.a)
+        //                 TableScan: t3
+
+        assert_decorrelate!(plan, @r"
+        Projection: t1.a, __exists_sq_2_output AS EXISTS [a:UInt32, EXISTS:Boolean]
+          Projection: t1.a, t1.b, t1.c, mark AS __exists_sq_2_output [a:UInt32, b:UInt32, c:UInt32, __exists_sq_2_output:Boolean]
+            LeftMark Join(ComparisonJoin):  Filter: t1.a IS NOT DISTINCT FROM t1_dscan_2.t1_a [a:UInt32, b:UInt32, c:UInt32, mark:Boolean]
+              TableScan: t1 [a:UInt32, b:UInt32, c:UInt32]
+              Filter: t2.a = t1_dscan_2.t1_a [a:UInt32, t1_a:UInt32;N]
+                Projection: t2.a, t1_dscan_2.t1_a [a:UInt32, t1_a:UInt32;N]
+                  Cross Join(ComparisonJoin):  [a:UInt32, b:UInt32, c:UInt32, t1_a:UInt32;N]
+                    Projection: t2.a, t2.b, t2.c [a:UInt32, b:UInt32, c:UInt32]
+                      Filter: __exists_sq_1_output [a:UInt32, b:UInt32, c:UInt32, __exists_sq_1_output:Boolean]
+                        Projection: t2.a, t2.b, t2.c, mark AS __exists_sq_1_output [a:UInt32, b:UInt32, c:UInt32, __exists_sq_1_output:Boolean]
+                          LeftMark Join(ComparisonJoin):  Filter: t2.a IS NOT DISTINCT FROM t2_dscan_1.t2_a [a:UInt32, b:UInt32, c:UInt32, mark:Boolean]
+                            TableScan: t2 [a:UInt32, b:UInt32, c:UInt32]
+                            Filter: t3.b = t2_dscan_1.t2_a [a:UInt32, b:UInt32, c:UInt32, t2_a:UInt32;N]
+                              Inner Join(DelimJoin):  Filter: Boolean(true) [a:UInt32, b:UInt32, c:UInt32, t2_a:UInt32;N]
+                                TableScan: t3 [a:UInt32, b:UInt32, c:UInt32]
+                                SubqueryAlias: t2_dscan_1 [t2_a:UInt32;N]
+                                  DelimGet: t2.a [t2_a:UInt32;N]
+                    SubqueryAlias: t1_dscan_2 [t1_a:UInt32;N]
+                      DelimGet: t1.a [t1_a:UInt32;N]
+        ");
+        Ok(())
     }
 
     #[test]
