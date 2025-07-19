@@ -207,7 +207,7 @@ impl DependentJoinRewriter {
         current_plan: LogicalPlanBuilder,
         subquery_alias_by_offset: HashMap<usize, String>,
     ) -> Result<LogicalPlanBuilder> {
-        let (transformed_plan, transformed_exprs) =
+        let (transformed_plan, mut transformed_exprs) =
             Self::rewrite_exprs_into_dependent_join_plan(
                 vec![original_proj.expr.iter().collect::<Vec<&Expr>>()],
                 dependent_join_node,
@@ -215,11 +215,28 @@ impl DependentJoinRewriter {
                 current_plan,
                 subquery_alias_by_offset,
             )?;
-        let transformed_proj_exprs =
-            transformed_exprs.first().ok_or(internal_datafusion_err!(
+        let mut transformed_proj_exprs =
+            transformed_exprs.pop().ok_or(internal_datafusion_err!(
                 "transform projection expr does not return 1 element"
             ))?;
-        transformed_plan.project(transformed_proj_exprs.clone())
+        // because dependent join generates a pseudo column to represent the evaluation
+        // of a whole subquery expr, it may not be aligned with the original
+        // plan, especially when the top most plan is a projection with a subquery expr
+        // if this is the case, we have to add an alias for the pseudo column
+        if self.stack.is_empty() {
+            original_proj
+                .schema
+                .columns()
+                .iter()
+                .zip(transformed_proj_exprs.iter_mut())
+                .for_each(|(original, rewritten)| {
+                    if rewritten.schema_name().to_string() != original.to_string() {
+                        *rewritten = std::mem::take(rewritten).alias(original.name());
+                    }
+                })
+        }
+
+        transformed_plan.project(transformed_proj_exprs)
     }
 
     fn rewrite_aggregate(
