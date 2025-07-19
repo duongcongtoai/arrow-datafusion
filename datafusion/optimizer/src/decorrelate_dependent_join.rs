@@ -2548,7 +2548,7 @@ mod tests {
     }
 
     #[test]
-    fn decorrelate_scalar_subquery_in_select() -> Result<()> {
+    fn decorrelate_scalar_subquery_with_alias_in_select() -> Result<()> {
         // Test case for: SELECT t1_id, (SELECT sum(t2_int) FROM t2 WHERE t2.t2_id = t1.t1_id) as t2_sum from t1
 
         // Create test tables
@@ -2587,9 +2587,6 @@ mod tests {
                 scalar_subquery(scalar_sq).alias("t2_sum"),
             ])?
             .build()?;
-        plan.clone().recompute_schema()?;
-        let child = (*plan.inputs().get(0).unwrap()).clone();
-        child.recompute_schema()?;
 
         // Projection: t1.t1_id, __scalar_sq_1.output AS t2_sum [t1_id:UInt32, t2_sum:Int64]
         //   DependentJoin on [t1.t1_id lvl 1] with expr (<subquery>) depth 1 [t1_id:UInt32, t1_name:Utf8, t1_int:Int32, output:Int64]
@@ -2613,6 +2610,117 @@ mod tests {
                           SubqueryAlias: t1_dscan_2 [t1_t1_id:UInt32;N]
                             DelimGet: t1.t1_id [t1_t1_id:UInt32;N]
                   SubqueryAlias: t1_dscan_1 [t1_t1_id:UInt32;N]
+                    DelimGet: t1.t1_id [t1_t1_id:UInt32;N]
+        ");
+
+        Ok(())
+    }
+
+    // TODO: need a mechanic to deduplicate subqueries, similar to CTE
+    #[test]
+    fn decorrelate_subqueries_without_alias_in_select() -> Result<()> {
+        // Create test tables
+        let t1 = test_table_with_columns(
+            "t1",
+            &[
+                ("t1_id", ArrowDataType::UInt32),
+                ("t1_name", ArrowDataType::Utf8),
+                ("t1_int", ArrowDataType::Int32),
+            ],
+        )?;
+
+        let t2 = test_table_with_columns(
+            "t2",
+            &[
+                ("t2_id", ArrowDataType::UInt32),
+                ("t2_int", ArrowDataType::Int32),
+                ("t2_value", ArrowDataType::Utf8),
+            ],
+        )?;
+
+        // Create the scalar subquery: SELECT sum(t2_int) FROM t2 WHERE t2.t2_id = t1.t1_id
+        let scalar_sq = Arc::new(
+            LogicalPlanBuilder::from(t2)
+                .filter(
+                    col("t2.t2_id").eq(out_ref_col(ArrowDataType::UInt32, "t1.t1_id")),
+                )?
+                .aggregate(Vec::<Expr>::new(), vec![sum(col("t2_int"))])?
+                .build()?,
+        );
+
+        // Create the main query plan: SELECT t1_id, (subquery) as t2_sum FROM t1
+        let plan = LogicalPlanBuilder::from(t1)
+            .project(vec![
+                col("t1_id"),
+                scalar_subquery(scalar_sq.clone()).alias("t2_sum"),
+            ])?
+            .project(vec![
+                col("t1_id"),
+                in_subquery(col("t1_id"), scalar_sq.clone()),
+            ])?
+            .project(vec![col("t1_id"), exists(scalar_sq)])?
+            .build()?;
+        // dependent join plan
+        // Projection: t1.t1_id, __exists_sq_3_output AS EXISTS
+        //   DependentJoin on [t1.t1_id lvl 1] with expr EXISTS (<subquery>) depth 1
+        //     Projection: t1.t1_id, __in_sq_2_output
+        //       DependentJoin on [t1.t1_id lvl 2] with expr t1.t1_id IN (<subquery>) depth 2
+        //         Projection: t1.t1_id, __scalar_sq_1_output AS t2_sum
+        //           DependentJoin on [t1.t1_id lvl 3] with expr (<subquery>) depth 3
+        //             TableScan: t1
+        //             Aggregate: groupBy=[[]], aggr=[[sum(t2.t2_int)]]
+        //               Filter: t2.t2_id = outer_ref(t1.t1_id)
+        //                 TableScan: t2
+        //         Aggregate: groupBy=[[]], aggr=[[sum(t2.t2_int)]]
+        //           Filter: t2.t2_id = outer_ref(t1.t1_id)
+        //             TableScan: t2
+        //     Aggregate: groupBy=[[]], aggr=[[sum(t2.t2_int)]]
+        //       Filter: t2.t2_id = outer_ref(t1.t1_id)
+        //         TableScan: t2
+
+        assert_decorrelate!(plan, @r"
+        Projection: t1.t1_id, __exists_sq_3_output AS EXISTS [t1_id:UInt32, EXISTS:Boolean]
+          Projection: t1.t1_id, __in_sq_2_output, t1_dscan_6.mark AS __exists_sq_3_output [t1_id:UInt32, __in_sq_2_output:Boolean, __exists_sq_3_output:Boolean]
+            LeftMark Join(ComparisonJoin):  Filter: t1.t1_id IS NOT DISTINCT FROM t1_dscan_6.t1_t1_id [t1_id:UInt32, __in_sq_2_output:Boolean, mark:Boolean]
+              Projection: t1.t1_id, __in_sq_2_output [t1_id:UInt32, __in_sq_2_output:Boolean]
+                Projection: t1.t1_id, t2_sum, t1_dscan_4.mark AS __in_sq_2_output [t1_id:UInt32, t2_sum:Int64, __in_sq_2_output:Boolean]
+                  LeftMark Join(ComparisonJoin):  Filter: t1.t1_id = sum(t2.t2_int) AND t1.t1_id IS NOT DISTINCT FROM t1_dscan_4.t1_t1_id [t1_id:UInt32, t2_sum:Int64, mark:Boolean]
+                    Projection: t1.t1_id, __scalar_sq_1_output AS t2_sum [t1_id:UInt32, t2_sum:Int64]
+                      Projection: t1.t1_id, t1.t1_name, t1.t1_int, sum(t2.t2_int), t1_dscan_2.t1_t1_id, sum(t2.t2_int) AS __scalar_sq_1_output [t1_id:UInt32, t1_name:Utf8, t1_int:Int32, sum(t2.t2_int):Int64;N, t1_t1_id:UInt32;N, __scalar_sq_1_output:Int64;N]
+                        Left Join(ComparisonJoin):  Filter: t1.t1_id IS NOT DISTINCT FROM t1_dscan_2.t1_t1_id [t1_id:UInt32, t1_name:Utf8, t1_int:Int32, sum(t2.t2_int):Int64;N, t1_t1_id:UInt32;N]
+                          TableScan: t1 [t1_id:UInt32, t1_name:Utf8, t1_int:Int32]
+                          Projection: sum(t2.t2_int), t1_dscan_2.t1_t1_id [sum(t2.t2_int):Int64;N, t1_t1_id:UInt32;N]
+                            Inner Join(DelimJoin):  Filter: t1_dscan_2.t1_t1_id IS NOT DISTINCT FROM t1_dscan_1.t1_t1_id [sum(t2.t2_int):Int64;N, t1_t1_id:UInt32;N, t1_t1_id:UInt32;N]
+                              Projection: sum(t2.t2_int), t1_dscan_2.t1_t1_id [sum(t2.t2_int):Int64;N, t1_t1_id:UInt32;N]
+                                Aggregate: groupBy=[[t1_dscan_2.t1_t1_id]], aggr=[[sum(t2.t2_int)]] [t1_t1_id:UInt32;N, sum(t2.t2_int):Int64;N]
+                                  Filter: t2.t2_id = t1_dscan_2.t1_t1_id [t2_id:UInt32, t2_int:Int32, t2_value:Utf8, t1_t1_id:UInt32;N]
+                                    Inner Join(DelimJoin):  Filter: Boolean(true) [t2_id:UInt32, t2_int:Int32, t2_value:Utf8, t1_t1_id:UInt32;N]
+                                      TableScan: t2 [t2_id:UInt32, t2_int:Int32, t2_value:Utf8]
+                                      SubqueryAlias: t1_dscan_2 [t1_t1_id:UInt32;N]
+                                        DelimGet: t1.t1_id [t1_t1_id:UInt32;N]
+                              SubqueryAlias: t1_dscan_1 [t1_t1_id:UInt32;N]
+                                DelimGet: t1.t1_id [t1_t1_id:UInt32;N]
+                    Projection: sum(t2.t2_int), t1_dscan_4.t1_t1_id [sum(t2.t2_int):Int64;N, t1_t1_id:UInt32;N]
+                      Inner Join(DelimJoin):  Filter: t1_dscan_4.t1_t1_id IS NOT DISTINCT FROM t1_dscan_3.t1_t1_id [sum(t2.t2_int):Int64;N, t1_t1_id:UInt32;N, t1_t1_id:UInt32;N]
+                        Projection: sum(t2.t2_int), t1_dscan_4.t1_t1_id [sum(t2.t2_int):Int64;N, t1_t1_id:UInt32;N]
+                          Aggregate: groupBy=[[t1_dscan_4.t1_t1_id]], aggr=[[sum(t2.t2_int)]] [t1_t1_id:UInt32;N, sum(t2.t2_int):Int64;N]
+                            Filter: t2.t2_id = t1_dscan_4.t1_t1_id [t2_id:UInt32, t2_int:Int32, t2_value:Utf8, t1_t1_id:UInt32;N]
+                              Inner Join(DelimJoin):  Filter: Boolean(true) [t2_id:UInt32, t2_int:Int32, t2_value:Utf8, t1_t1_id:UInt32;N]
+                                TableScan: t2 [t2_id:UInt32, t2_int:Int32, t2_value:Utf8]
+                                SubqueryAlias: t1_dscan_4 [t1_t1_id:UInt32;N]
+                                  DelimGet: t1.t1_id [t1_t1_id:UInt32;N]
+                        SubqueryAlias: t1_dscan_3 [t1_t1_id:UInt32;N]
+                          DelimGet: t1.t1_id [t1_t1_id:UInt32;N]
+              Projection: sum(t2.t2_int), t1_dscan_6.t1_t1_id [sum(t2.t2_int):Int64;N, t1_t1_id:UInt32;N]
+                Inner Join(DelimJoin):  Filter: t1_dscan_6.t1_t1_id IS NOT DISTINCT FROM t1_dscan_5.t1_t1_id [sum(t2.t2_int):Int64;N, t1_t1_id:UInt32;N, t1_t1_id:UInt32;N]
+                  Projection: sum(t2.t2_int), t1_dscan_6.t1_t1_id [sum(t2.t2_int):Int64;N, t1_t1_id:UInt32;N]
+                    Aggregate: groupBy=[[t1_dscan_6.t1_t1_id]], aggr=[[sum(t2.t2_int)]] [t1_t1_id:UInt32;N, sum(t2.t2_int):Int64;N]
+                      Filter: t2.t2_id = t1_dscan_6.t1_t1_id [t2_id:UInt32, t2_int:Int32, t2_value:Utf8, t1_t1_id:UInt32;N]
+                        Inner Join(DelimJoin):  Filter: Boolean(true) [t2_id:UInt32, t2_int:Int32, t2_value:Utf8, t1_t1_id:UInt32;N]
+                          TableScan: t2 [t2_id:UInt32, t2_int:Int32, t2_value:Utf8]
+                          SubqueryAlias: t1_dscan_6 [t1_t1_id:UInt32;N]
+                            DelimGet: t1.t1_id [t1_t1_id:UInt32;N]
+                  SubqueryAlias: t1_dscan_5 [t1_t1_id:UInt32;N]
                     DelimGet: t1.t1_id [t1_t1_id:UInt32;N]
         ");
 
