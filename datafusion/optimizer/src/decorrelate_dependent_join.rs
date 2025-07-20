@@ -691,7 +691,6 @@ impl DependentJoinDecorrelator {
                         &domain_col.0,
                     )?));
                 }
-                println!("error rewriting {new_input}\n,{:?}", proj.expr);
                 let proj = Projection::try_new(proj.expr, new_input.into())?;
                 return Self::rewrite_outer_ref_columns(
                     LogicalPlan::Projection(proj),
@@ -799,7 +798,6 @@ impl DependentJoinDecorrelator {
                                         when(agg_expr.clone().is_null(), lit(0))
                                             .otherwise(agg_expr.clone())?;
 
-                                    println!("{expr_name} replaced by {expr_to_replace}");
                                     self.replacement_map
                                         .insert(expr_name, expr_to_replace);
                                     continue;
