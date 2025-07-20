@@ -1,0 +1,63 @@
+statement ok
+CREATE TABLE t1 AS
+SELECT * FROM (
+    VALUES
+        (1, 2, 3),
+        (4, 5, 6),
+        (7, 8, 9)
+) AS t(a, b, c);
+
+
+statement ok
+CREATE TABLE t2 AS
+SELECT * FROM (
+    VALUES
+        (1, 2, 3),
+        (4, 5, 6),
+        (7, 8, 9)
+) AS t(a, b, c);
+
+
+statement ok
+CREATE TABLE t3 AS
+SELECT * FROM (
+    VALUES
+        (1, 2, 3),
+        (4, 5, 6),
+        (7, 8, 9)
+) AS t(a, b, c);
+
+
+query TT
+explain select * from t1 where (
+    with cte as (select * from t2 where t2.a=t1.a)
+    select count(*) from cte c1 join cte c2 on c1.a=c2.b
+)=1
+----
+
+
+
+query TT
+explain WITH RECURSIVE numbers AS (
+  select a from t1
+  UNION ALL
+  select a + 1 FROM numbers WHERE a < 10
+) select * from numbers;
+----
+logical_plan
+01)SubqueryAlias: numbers
+02)--RecursiveQuery: is_distinct=false
+03)----Projection: t1.a
+04)------TableScan: t1
+05)----Projection: numbers.a + Int64(1)
+06)------Filter: numbers.a < Int64(10)
+07)--------TableScan: numbers
+physical_plan
+01)RecursiveQueryExec: name=numbers, is_distinct=false
+02)--DataSourceExec: partitions=1, partition_sizes=[1]
+03)--CoalescePartitionsExec
+04)----ProjectionExec: expr=[a@0 + 1 as numbers.a + Int64(1)]
+05)------CoalesceBatchesExec: target_batch_size=8192
+06)--------FilterExec: a@0 < 10
+07)----------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
+08)------------WorkTableExec: name=numbers

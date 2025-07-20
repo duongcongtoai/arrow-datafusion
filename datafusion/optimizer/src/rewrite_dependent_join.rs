@@ -383,6 +383,8 @@ impl DependentJoinRewriter {
         stack_with_table_provider: &[usize],
         stack_with_subquery: &[usize],
     ) -> (usize, usize) {
+        // TODO: this panic if there is a subquery at the root of the query plan
+        // which is possible for CTE
         let mut lowest_common_ancestor = 0;
         let mut subquery_node_id = 0;
 
