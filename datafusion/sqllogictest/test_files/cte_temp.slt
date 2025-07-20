@@ -1,0 +1,90 @@
+statement ok
+CREATE TABLE t1 AS
+SELECT * FROM (
+    VALUES
+        (1, 2, 3),
+        (4, 5, 6),
+        (7, 8, 9)
+) AS t(a, b, c);
+
+
+statement ok
+CREATE TABLE t2 AS
+SELECT * FROM (
+    VALUES
+        (1, 2, 3),
+        (4, 5, 6),
+        (7, 8, 9)
+) AS t(a, b, c);
+
+
+statement ok
+CREATE TABLE t3 AS
+SELECT * FROM (
+    VALUES
+        (1, 2, 3),
+        (4, 5, 6),
+        (7, 8, 9)
+) AS t(a, b, c);
+
+
+query TT
+explain select * from t1 where (
+    with cte as (select * from t2 where t2.a=t1.a)
+    select count(*) from cte c1 join cte c2 on c1.a=c2.b
+)=1
+----
+logical_plan
+01)Projection: t1.a, t1.b, t1.c
+02)--Filter: count(*) = Int64(1)
+03)----Projection: t1.a, t1.b, t1.c, count(*)
+04)------Left Join(ComparisonJoin):  Filter: t1.a IS NOT DISTINCT FROM c2.t1_a
+05)--------TableScan: t1 projection=[a, b, c]
+06)--------Projection: CASE WHEN Boolean(false) THEN Int32(0) ELSE count(Int64(1)) END AS count(*), c2.t1_a
+07)----------Inner Join(ComparisonJoin):  Filter: c2.t1_a IS NOT DISTINCT FROM t1_dscan_1.t1_a
+08)------------Aggregate: groupBy=[[c2.t1_a]], aggr=[[]]
+09)--------------Projection: c2.t1_a
+10)----------------Inner Join(ComparisonJoin): c1.a = c2.b Filter: c1.t1_a IS NOT DISTINCT FROM c2.t1_a
+11)------------------SubqueryAlias: c1
+12)--------------------SubqueryAlias: cte
+13)----------------------Inner Join(ComparisonJoin): t2.a = t1_dscan_2.t1_a
+14)------------------------TableScan: t2 projection=[a]
+15)------------------------SubqueryAlias: t1_dscan_2
+16)--------------------------DelimGet: t1.a
+17)------------------SubqueryAlias: c2
+18)--------------------SubqueryAlias: cte
+19)----------------------Projection: t2.b, t1_dscan_3.t1_a
+20)------------------------Inner Join(ComparisonJoin): t2.a = t1_dscan_3.t1_a
+21)--------------------------TableScan: t2 projection=[a, b]
+22)--------------------------SubqueryAlias: t1_dscan_3
+23)----------------------------DelimGet: t1.a
+24)------------SubqueryAlias: t1_dscan_1
+25)--------------DelimGet: t1.a
+physical_plan_error Internal error: Optimizors have not completely remove delim get
+
+
+
+query TT
+explain WITH RECURSIVE numbers AS (
+  select a from t1
+  UNION ALL
+  select a + 1 FROM numbers WHERE a < 10
+) select * from numbers;
+----
+logical_plan
+01)SubqueryAlias: numbers
+02)--RecursiveQuery: is_distinct=false
+03)----Projection: t1.a
+04)------TableScan: t1
+05)----Projection: numbers.a + Int64(1)
+06)------Filter: numbers.a < Int64(10)
+07)--------TableScan: numbers
+physical_plan
+01)RecursiveQueryExec: name=numbers, is_distinct=false
+02)--DataSourceExec: partitions=1, partition_sizes=[1]
+03)--CoalescePartitionsExec
+04)----ProjectionExec: expr=[a@0 + 1 as numbers.a + Int64(1)]
+05)------CoalesceBatchesExec: target_batch_size=8192
+06)--------FilterExec: a@0 < 10
+07)----------RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
+08)------------WorkTableExec: name=numbers
