@@ -48,7 +48,7 @@ use crate::{
 };
 
 use super::dml::InsertOp;
-use super::plan::{ColumnUnnestList, ExplainFormat, JoinKind};
+use super::plan::JoinKind;
 use super::CorrelatedColumnInfo;
 use arrow::compute::can_cast_types;
 use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
