@@ -2341,7 +2341,7 @@ impl LogicalPlan {
     ///
     /// ```
     pub fn display_tree(&self) -> impl Display + '_ {
-        tree_render(self)
+        tree_render(self, 240)
     }
 }
 

@@ -29,9 +29,12 @@ use datafusion_common::HashMap;
 
 use crate::{DisplayFormatType, ExecutionPlan};
 
-pub(crate) fn tree_render<'a>(plan: &dyn ExecutionPlan) -> impl fmt::Display + 'a {
+pub(crate) fn tree_render<'a>(
+    plan: &dyn ExecutionPlan,
+    max_width: usize,
+) -> impl fmt::Display + 'a {
     let (width, height) = get_tree_width_height(plan);
-    let mut result = RenderTree::new(width, height);
+    let mut result = RenderTree::new(width, height, max_width);
     create_tree_recursive(&mut result, plan, 0, 0);
     result
 }
