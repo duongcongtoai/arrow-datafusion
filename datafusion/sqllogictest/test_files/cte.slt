@@ -92,6 +92,7 @@ SELECT * FROM nodes
 8
 9
 
+
 # explain trivial recursive CTE
 query TT
 EXPLAIN WITH RECURSIVE nodes AS (

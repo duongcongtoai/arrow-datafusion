@@ -74,6 +74,8 @@ pub struct DisplayableExecutionPlan<'a> {
     show_statistics: bool,
     /// If schema should be displayed. See [`Self::set_show_schema`]
     show_schema: bool,
+    // (TreeRender) Maximum total width of the rendered tree
+    tree_maximum_render_width: usize,
 }
 
 impl<'a> DisplayableExecutionPlan<'a> {
@@ -85,6 +87,7 @@ impl<'a> DisplayableExecutionPlan<'a> {
             show_metrics: ShowMetrics::None,
             show_statistics: false,
             show_schema: false,
+            tree_maximum_render_width: 240,
         }
     }
 
@@ -97,6 +100,7 @@ impl<'a> DisplayableExecutionPlan<'a> {
             show_metrics: ShowMetrics::Aggregated,
             show_statistics: false,
             show_schema: false,
+            tree_maximum_render_width: 240,
         }
     }
 
@@ -109,6 +113,7 @@ impl<'a> DisplayableExecutionPlan<'a> {
             show_metrics: ShowMetrics::Full,
             show_statistics: false,
             show_schema: false,
+            tree_maximum_render_width: 240,
         }
     }
 
@@ -124,6 +129,12 @@ impl<'a> DisplayableExecutionPlan<'a> {
     /// Enable display of statistics
     pub fn set_show_statistics(mut self, show_statistics: bool) -> Self {
         self.show_statistics = show_statistics;
+        self
+    }
+
+    /// Set the maximum render width for the tree format
+    pub fn set_tree_maximum_render_width(mut self, width: usize) -> Self {
+        self.tree_maximum_render_width = width;
         self
     }
 
@@ -222,7 +233,7 @@ impl<'a> DisplayableExecutionPlan<'a> {
     ///
     /// See [`DisplayFormatType::TreeRender`] for more details.
     pub fn tree_render(&self) -> impl fmt::Display + 'a {
-        tree_render(self.inner)
+        tree_render(plan, self.tree_maximum_render_width)
     }
 
     /// Return a single-line summary of the root of the plan
@@ -457,6 +468,15 @@ impl ExecutionPlanVisitor for GraphvizVisitor<'_, '_> {
         self.parents.pop();
         Ok(true)
     }
+}
+
+/// Trait for types which could have additional details when formatted in `Verbose` mode
+pub trait DisplayAs {
+    /// Format according to `DisplayFormatType`, used when verbose representation looks
+    /// different from the default one
+    ///
+    /// Should not include a newline
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut Formatter) -> fmt::Result;
 }
 
 /// A new type wrapper to display `T` implementing`DisplayAs` using the `Default` mode

@@ -20,7 +20,7 @@
 use crate::display::{DisplayAs, DisplayFormatType};
 use crate::tree_node::{TreeNode, TreeNodeRecursion};
 use crate::HashMap;
-use std::collections::{BTreeMap};
+use std::collections::BTreeMap;
 use std::fmt::Formatter;
 use std::sync::Arc;
 use std::{cmp, fmt};
@@ -48,7 +48,9 @@ use std::{cmp, fmt};
 /// 3. Bottom layer: renders the bottom borders and connections
 ///
 /// Each node is rendered in a box of fixed width (NODE_RENDER_WIDTH).
-pub struct TreeRenderVisitor {}
+pub struct TreeRenderVisitor {
+    max_width: usize,
+}
 
 impl TreeRenderVisitor {
     /// Main entry point for rendering an execution plan as a tree.
@@ -60,7 +62,7 @@ impl TreeRenderVisitor {
         &mut self,
         plan: &T,
     ) -> Result<RenderTree, fmt::Error> {
-        let root = RenderTree::create_tree(plan);
+        let root = RenderTree::create_tree(plan, self.max_width);
         Ok(root)
     }
 }
@@ -79,9 +81,28 @@ impl RenderTree {
     const HORIZONTAL: &'static str = "─"; // Horizontal line
 
     // TODO: Make these variables configurable.
-    const MAXIMUM_RENDER_WIDTH: usize = 240; // Maximum total width of the rendered tree
     const NODE_RENDER_WIDTH: usize = 29; // Width of each node's box
     const MAX_EXTRA_LINES: usize = 30; // Maximum number of extra info lines per node
+
+    // /// Main entry point for rendering an execution plan as a tree.
+    // /// The rendering process happens in three stages for each level of the tree:
+    // /// 1. Render top borders and connections
+    // /// 2. Render node content and vertical connections
+    // /// 3. Render bottom borders and connections
+    // pub fn visit(&mut self, plan: &T) -> Result<(), fmt::Error> {
+    //     let root = RenderTree::create_tree(plan, self.maximum_render_width);
+
+    //     for y in 0..root.height {
+    //         // Start by rendering the top layer.
+    //         root.render_top_layer(&root, y)?;
+    //         // Now we render the content of the boxes
+    //         root.render_box_content(&root, y)?;
+    //         // Render the bottom layer of each of the boxes
+    //         root.render_bottom_layer(&root, y)?;
+    //     }
+
+    //     Ok(())
+    // }
 
     /// Renders the top layer of boxes at the given y-level of the tree.
     /// This includes:
@@ -90,6 +111,12 @@ impl RenderTree {
     /// - Vertical connections to parent nodes
     fn render_top_layer(&self, f: &mut Formatter, y: usize) -> Result<(), fmt::Error> {
         for x in 0..self.width {
+            if self.maximum_render_width > 0
+                && x * Self::NODE_RENDER_WIDTH >= self.maximum_render_width
+            {
+                break;
+            }
+
             if self.has_node(x, y) {
                 write!(f, "{}", Self::LTCORNER)?;
                 write!(
@@ -156,7 +183,9 @@ impl RenderTree {
         // Render the actual node.
         for render_y in 0..=extra_height {
             for (x, _) in self.nodes.iter().enumerate().take(self.width) {
-                if x * Self::NODE_RENDER_WIDTH >= Self::MAXIMUM_RENDER_WIDTH {
+                if self.maximum_render_width > 0
+                    && x * Self::NODE_RENDER_WIDTH >= self.maximum_render_width
+                {
                     break;
                 }
 
@@ -257,7 +286,9 @@ impl RenderTree {
     /// - Vertical connections to child nodes
     fn render_bottom_layer(&self, f: &mut Formatter, y: usize) -> Result<(), fmt::Error> {
         for x in 0..=self.width {
-            if x * Self::NODE_RENDER_WIDTH >= Self::MAXIMUM_RENDER_WIDTH {
+            if self.maximum_render_width > 0
+                && x * Self::NODE_RENDER_WIDTH >= self.maximum_render_width
+            {
                 break;
             }
             let mut has_adjacent_nodes = false;
@@ -287,10 +318,10 @@ impl RenderTree {
             } else if self.has_node(x, y + 1) {
                 write!(f, "{}", &" ".repeat(Self::NODE_RENDER_WIDTH / 2))?;
                 write!(f, "{}", Self::VERTICAL)?;
-                if has_adjacent_nodes || self.should_render_whitespace(x, y) {
+                if has_adjacent_nodes || Self::should_render_whitespace(self, x, y) {
                     write!(f, "{}", &" ".repeat(Self::NODE_RENDER_WIDTH / 2))?;
                 }
-            } else if has_adjacent_nodes || self.should_render_whitespace(x, y) {
+            } else if has_adjacent_nodes || Self::should_render_whitespace(self, x, y) {
                 write!(f, "{}", &" ".repeat(Self::NODE_RENDER_WIDTH))?;
             }
         }
@@ -519,6 +550,7 @@ pub struct RenderTree {
     width: usize,
     /// Total height of the rendered tree
     height: usize,
+    maximum_render_width: usize,
 }
 
 impl fmt::Display for RenderTree {
@@ -537,21 +569,22 @@ impl fmt::Display for RenderTree {
 }
 
 impl RenderTree {
-    fn create_tree<T: FormattedTreeNode>(node: &T) -> Self {
+    fn create_tree<T: FormattedTreeNode>(node: &T, max_width: usize) -> Self {
         let (width, height) = get_tree_width_height(node);
 
-        let mut result = Self::new(width, height);
+        let mut result = Self::new(width, height, max_width);
 
         create_tree_recursive(&mut result, node, 0, 0);
 
         result
     }
 
-    pub fn new(width: usize, height: usize) -> Self {
+    pub fn new(width: usize, height: usize, max_width: usize) -> Self {
         RenderTree {
             nodes: vec![None; (width + 1) * (height + 1)],
             width,
             height,
+            maximum_render_width: max_width,
         }
     }
 
@@ -683,8 +716,11 @@ pub fn create_tree_recursive<T: FormattedTreeNode>(
 }
 
 // render the whole tree
-pub fn tree_render<'a, T: FormattedTreeNode>(n: &'a T) -> impl fmt::Display + use<'a, T> {
-    let mut visitor = TreeRenderVisitor {};
+pub fn tree_render<'a, T: FormattedTreeNode>(
+    n: &'a T,
+    max_width: usize,
+) -> impl fmt::Display + use<'a, T> {
+    let mut visitor = TreeRenderVisitor { max_width };
     let root = visitor.visit(n).unwrap();
     root
 }
