@@ -233,7 +233,7 @@ impl<'a> DisplayableExecutionPlan<'a> {
     ///
     /// See [`DisplayFormatType::TreeRender`] for more details.
     pub fn tree_render(&self) -> impl fmt::Display + 'a {
-        tree_render(plan, self.tree_maximum_render_width)
+        tree_render(self.inner, self.tree_maximum_render_width)
     }
 
     /// Return a single-line summary of the root of the plan
@@ -471,13 +471,13 @@ impl ExecutionPlanVisitor for GraphvizVisitor<'_, '_> {
 }
 
 /// Trait for types which could have additional details when formatted in `Verbose` mode
-pub trait DisplayAs {
-    /// Format according to `DisplayFormatType`, used when verbose representation looks
-    /// different from the default one
-    ///
-    /// Should not include a newline
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut Formatter) -> fmt::Result;
-}
+// pub trait DisplayAs {
+//     /// Format according to `DisplayFormatType`, used when verbose representation looks
+//     /// different from the default one
+//     ///
+//     /// Should not include a newline
+//     fn fmt_as(&self, t: DisplayFormatType, f: &mut Formatter) -> fmt::Result;
+// }
 
 /// A new type wrapper to display `T` implementing`DisplayAs` using the `Default` mode
 pub struct DefaultDisplay<T>(pub T);
