@@ -1334,6 +1334,26 @@ impl DependentJoinDecorrelator {
                     .alias(alias.alias.clone())?
                     .build()
             }
+            LogicalPlan::Union(union) => {
+                let new_left = union.inputs.get(0).unwrap();
+                let new_right = union.inputs.get(1).unwrap();
+                println!("left previous schema {:?}", new_left.schema().columns());
+                let pushed_down_left = self.push_down_dependent_join(
+                    new_left.as_ref(),
+                    parent_propagate_nulls,
+                    lateral_depth,
+                )?;
+
+                println!("left new schema {:?}", pushed_down_left.schema().columns());
+                let pushed_down_right = self.push_down_dependent_join(
+                    new_right.as_ref(),
+                    parent_propagate_nulls,
+                    lateral_depth,
+                )?;
+                LogicalPlanBuilder::new(pushed_down_left)
+                    .union(pushed_down_right)?
+                    .build()
+            }
             plan_ => {
                 unimplemented!("implement pushdown dependent join for node {plan_}")
             }
@@ -2759,6 +2779,56 @@ mod tests {
                     DelimGet: t1.t1_id [t1_t1_id:UInt32;N]
         ");
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_union() -> Result<()> {
+        //  SELECT t1_id, t1_name FROM t1 WHERE EXISTS (
+        // SELECT * FROM t2 WHERE t2_id = t1_id UNION ALL SELECT * FROM t2 WHERE upper(t2_name) = upper(t1.t1_name))
+
+        let t1 = test_table_with_columns(
+            "t1",
+            &[("id", ArrowDataType::Int32), ("val", ArrowDataType::Int32)],
+        )?;
+        let t2 = test_table_with_columns(
+            "t2",
+            &[("id", ArrowDataType::Int32), ("val", ArrowDataType::Int32)],
+        )?;
+        let sq_with_union = LogicalPlanBuilder::new(t2.clone())
+            .filter(col("t2.id").eq(out_ref_col(ArrowDataType::Int32, "t1.id")))?
+            .union(
+                LogicalPlanBuilder::new(t2)
+                    .filter(
+                        col("t2.val").eq(out_ref_col(ArrowDataType::Int32, "t1.val")),
+                    )?
+                    .build()?,
+            )?
+            .build()?;
+        let plan = LogicalPlanBuilder::new(t1)
+            .filter(exists(Arc::new(sq_with_union)))?
+            .build()?;
+        assert_decorrelate!(
+            plan,
+            @r"
+        Projection: t1.id, t1.val [id:Int32, val:Int32]
+          Filter: __exists_sq_1_output [id:Int32, val:Int32, __exists_sq_1_output:Boolean]
+            Projection: t1.id, t1.val, mark AS __exists_sq_1_output [id:Int32, val:Int32, __exists_sq_1_output:Boolean]
+              LeftMark Join(ComparisonJoin):  Filter: t1.id IS NOT DISTINCT FROM t1_dscan_2.t1_id AND t1.val IS NOT DISTINCT FROM t1_dscan_2.t1_val [id:Int32, val:Int32, mark:Boolean]
+                TableScan: t1 [id:Int32, val:Int32]
+                Union [id:Int32, val:Int32, t1_id:Int32;N, t1_val:Int32;N]
+                  Filter: t2.id = t1_dscan_1.t1_id [id:Int32, val:Int32, t1_id:Int32;N, t1_val:Int32;N]
+                    Inner Join(DelimJoin):  Filter: Boolean(true) [id:Int32, val:Int32, t1_id:Int32;N, t1_val:Int32;N]
+                      TableScan: t2 [id:Int32, val:Int32]
+                      SubqueryAlias: t1_dscan_1 [t1_id:Int32;N, t1_val:Int32;N]
+                        DelimGet: t1.id, t1.val [t1_id:Int32;N, t1_val:Int32;N]
+                  Filter: t2.val = t1_dscan_2.t1_val [id:Int32, val:Int32, t1_id:Int32;N, t1_val:Int32;N]
+                    Inner Join(DelimJoin):  Filter: Boolean(true) [id:Int32, val:Int32, t1_id:Int32;N, t1_val:Int32;N]
+                      TableScan: t2 [id:Int32, val:Int32]
+                      SubqueryAlias: t1_dscan_2 [t1_id:Int32;N, t1_val:Int32;N]
+                        DelimGet: t1.id, t1.val [t1_id:Int32;N, t1_val:Int32;N]
+        "
+        );
         Ok(())
     }
 }
