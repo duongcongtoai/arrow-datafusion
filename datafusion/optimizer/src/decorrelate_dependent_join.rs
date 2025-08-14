@@ -1335,18 +1335,19 @@ impl DependentJoinDecorrelator {
                     .build()
             }
             LogicalPlan::Union(union) => {
-                let new_left = union.inputs.get(0).unwrap();
-                let new_right = union.inputs.get(1).unwrap();
-                println!("left previous schema {:?}", new_left.schema().columns());
+                let [left, right, ..] = union.inputs.as_slice() else {
+                    return internal_err!("union logical plan does not have two input");
+                };
+                // push all domains down to both side
+
                 let pushed_down_left = self.push_down_dependent_join(
-                    new_left.as_ref(),
+                    left.as_ref(),
                     parent_propagate_nulls,
                     lateral_depth,
                 )?;
 
-                println!("left new schema {:?}", pushed_down_left.schema().columns());
                 let pushed_down_right = self.push_down_dependent_join(
-                    new_right.as_ref(),
+                    right.as_ref(),
                     parent_propagate_nulls,
                     lateral_depth,
                 )?;
