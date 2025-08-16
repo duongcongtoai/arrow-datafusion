@@ -661,7 +661,8 @@ impl DependentJoinDecorrelator {
                         );
                     }
                 }
-                LogicalPlan::RecursiveQuery(_) => {
+                LogicalPlan::RecursiveQuery(p) => {
+                    println!("{}", LogicalPlan::RecursiveQuery(p.clone()));
                     // duckdb support this
                     unimplemented!("")
                 }
@@ -1353,6 +1354,45 @@ impl DependentJoinDecorrelator {
                 )?;
                 LogicalPlanBuilder::new(pushed_down_left)
                     .union(pushed_down_right)?
+                    .build()
+            }
+            LogicalPlan::RecursiveQuery(rq) => {
+                let mut new_static = self.push_down_dependent_join_internal(
+                    &rq.static_term.as_ref(),
+                    parent_propagate_nulls,
+                    lateral_depth,
+                )?;
+                new_static = Self::rewrite_outer_ref_columns(
+                    new_static,
+                    &self.correlated_column_to_delim_column,
+                    true,
+                )?;
+                // TODO: in DuckDB they maintains a set of exprs for deduplication
+                // and domains/corr_columns should be added to this set
+                // Looks like DF does not have it
+
+                // This is used by duckdb to push correlated columns of current level
+                // down to the dependent join nodes (if any) below the recursive_term
+                // We (may) don't need it, our dependent join plan already aware of this.
+                //
+                //		RewriteCTEScan cte_rewriter(table_index, correlated_columns);
+                //		cte_rewriter.VisitOperator(*plan->children[1]);
+                let mut new_recursive_term = self.push_down_dependent_join_internal(
+                    &rq.recursive_term.as_ref(),
+                    parent_propagate_nulls,
+                    lateral_depth,
+                )?;
+                new_recursive_term = Self::rewrite_outer_ref_columns(
+                    new_recursive_term,
+                    &self.correlated_column_to_delim_column,
+                    true,
+                )?;
+                LogicalPlanBuilder::new(new_static)
+                    .to_recursive_query(
+                        rq.name.clone(),
+                        new_recursive_term,
+                        rq.is_distinct,
+                    )?
                     .build()
             }
             plan_ => {
