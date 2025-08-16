@@ -60,7 +60,9 @@ logical_plan
 23)----------------------------DelimGet: t1.a
 24)------------SubqueryAlias: t1_dscan_1
 25)--------------DelimGet: t1.a
-physical_plan_error Internal error: Optimizors have not completely remove delim get
+physical_plan_error
+01)Internal error: Optimizors have not completely remove delim get.
+02)This issue was likely caused by a bug in DataFusion's code. Please help us to resolve this by filing a bug report in our issue tracker: https://github.com/apache/datafusion/issues
 
 
 
@@ -97,7 +99,9 @@ logical_plan
 23)----------------------------DelimGet: t1.a
 24)------------SubqueryAlias: t1_dscan_1
 25)--------------DelimGet: t1.a
-physical_plan_error Internal error: Optimizors have not completely remove delim get
+physical_plan_error
+01)Internal error: Optimizors have not completely remove delim get.
+02)This issue was likely caused by a bug in DataFusion's code. Please help us to resolve this by filing a bug report in our issue tracker: https://github.com/apache/datafusion/issues
 
 statement count 0
 set datafusion.execution.enable_recursive_ctes = true;
@@ -140,7 +144,10 @@ logical_plan
 23)--------------------DelimGet: t1.a
 24)------------SubqueryAlias: t1_dscan_1
 25)--------------DelimGet: t1.a
-physical_plan_error Internal error: Optimizors have not completely remove delim get
+physical_plan_error
+01)Internal error: Optimizors have not completely remove delim get.
+02)This issue was likely caused by a bug in DataFusion's code. Please help us to resolve this by filing a bug report in our issue tracker: https://github.com/apache/datafusion/issues
+
 
 
 query TT
@@ -182,7 +189,9 @@ logical_plan
 25)------------------------------DelimGet: t1.a
 26)------------SubqueryAlias: t1_dscan_1
 27)--------------DelimGet: t1.a
-physical_plan_error Internal error: Optimizors have not completely remove delim get
+physical_plan_error
+01)Internal error: Optimizors have not completely remove delim get.
+02)This issue was likely caused by a bug in DataFusion's code. Please help us to resolve this by filing a bug report in our issue tracker: https://github.com/apache/datafusion/issues
 
 
 query TT
@@ -234,9 +243,13 @@ logical_plan
 31)--------------------DelimGet: t1.a
 32)------------SubqueryAlias: t1_dscan_1
 33)--------------DelimGet: t1.a
-physical_plan_error Internal error: Optimizors have not completely remove delim get
+physical_plan_error
+01)Internal error: Optimizors have not completely remove delim get.
+02)This issue was likely caused by a bug in DataFusion's code. Please help us to resolve this by filing a bug report in our issue tracker: https://github.com/apache/datafusion/issues
 
 
+
+# group median i16 nullable
 query TT
 explain select * from t1 where t1.b = (
     with recursive tree_branch as (
@@ -286,5 +299,8 @@ logical_plan
 31)--------------------DelimGet: t1.a
 32)------------SubqueryAlias: t1_dscan_1
 33)--------------DelimGet: t1.a
-physical_plan_error Internal error: Optimizors have not completely remove delim get
+physical_plan_error
+01)Internal error: Optimizors have not completely remove delim get.
+02)This issue was likely caused by a bug in DataFusion's code. Please help us to resolve this by filing a bug report in our issue tracker: https://github.com/apache/datafusion/issues
+
 
