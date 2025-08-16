@@ -136,8 +136,18 @@ pub fn should_skip_record<D: AsyncDB>(
 
 fn statement_is_skippable(statement: &Statement) -> bool {
     // Only SQL statements can be skipped.
-    let Statement::Statement(sql_stmt) = statement else {
-        return false;
+    let sql_stmt = match statement {
+        Statement::Statement(sql_stmt) => sql_stmt,
+        Statement::Explain(explain_stmt) => {
+            let inner_stmt =
+                if let Statement::Statement(sql_stmt) = explain_stmt.statement.as_ref() {
+                    sql_stmt
+                } else {
+                    return false;
+                };
+            inner_stmt
+        }
+        _ => return false,
     };
 
     // Cannot skip SELECT INTO statements, as they can also create tables
