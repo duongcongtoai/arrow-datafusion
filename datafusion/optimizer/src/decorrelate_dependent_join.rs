@@ -18,13 +18,16 @@
 //! [`DependentJoinRewriter`] converts correlated subqueries to `DependentJoin`
 
 use crate::analyzer::type_coercion::TypeCoercionRewriter;
+use crate::deliminator::Deliminator;
 use crate::rewrite_dependent_join::DependentJoinRewriter;
 use crate::{ApplyOrder, OptimizerConfig, OptimizerRule};
 use std::ops::Deref;
 use std::sync::Arc;
 
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion_common::{internal_datafusion_err, internal_err, Column, Result};
+use datafusion_common::{
+    internal_datafusion_err, internal_err, not_impl_datafusion_err, Column, Result,
+};
 use datafusion_expr::expr::{
     self, Exists, InSubquery, WindowFunction, WindowFunctionParams,
 };
@@ -41,6 +44,8 @@ use itertools::Itertools;
 
 #[derive(Clone, Debug)]
 pub struct DependentJoinDecorrelator {
+    // mostly table scan or subquery alias
+    delim_scan_nodes: IndexMap<usize, LogicalPlan>,
     // immutable, defined when this object is constructed
     domains: IndexSet<CorrelatedColumnInfo>,
     // for each domain column, the corresponding column in delim_get
@@ -111,7 +116,7 @@ fn natural_join(
 }
 
 impl DependentJoinDecorrelator {
-    fn new_root() -> Self {
+    fn new_root(delim_scan_nodes: IndexMap<usize, LogicalPlan>) -> Self {
         Self {
             domains: IndexSet::new(),
             correlated_map: IndexMap::new(),
@@ -121,6 +126,7 @@ impl DependentJoinDecorrelator {
             any_join: true,
             delim_scan_id: 0,
             dscan_cols: vec![],
+            delim_scan_nodes,
         }
     }
 
@@ -129,6 +135,7 @@ impl DependentJoinDecorrelator {
         correlated_columns_from_parent: &Vec<CorrelatedColumnInfo>,
         is_initial: bool,
         any_join: bool,
+        delim_scan_nodes: IndexMap<usize, LogicalPlan>,
         delim_scan_id: usize,
         depth: usize,
     ) -> Self {
@@ -163,6 +170,7 @@ impl DependentJoinDecorrelator {
         merged_correlated_columns.extend_from_slice(&node.correlated_columns);
 
         Self {
+            delim_scan_nodes,
             domains,
             correlated_map: IndexMap::new(),
             is_initial,
@@ -175,7 +183,7 @@ impl DependentJoinDecorrelator {
     }
 
     fn decorrelate_independent(&mut self, plan: &LogicalPlan) -> Result<LogicalPlan> {
-        let mut decorrelator = DependentJoinDecorrelator::new_root();
+        let mut decorrelator = DependentJoinDecorrelator::new_root(self.delim_scan_nodes.clone());
 
         decorrelator.decorrelate(plan, true, 0)
     }
@@ -232,6 +240,7 @@ impl DependentJoinDecorrelator {
                 &self.correlated_columns,
                 false,
                 self.any_join,
+                self.delim_scan_nodes.clone(),
                 self.delim_scan_id,
                 djoin.subquery_depth,
             );
@@ -302,7 +311,7 @@ impl DependentJoinDecorrelator {
         _perform_delim: bool,
     ) -> Result<(Expr, JoinType, Option<Expr>)> {
         if node.lateral_join_condition.is_some() {
-            unimplemented!()
+            return Err(not_impl_datafusion_err!("lateral join not supported"));
         }
 
         let mut join_conditions = vec![];
@@ -409,7 +418,7 @@ impl DependentJoinDecorrelator {
         // replace correlated column in dependent with delimget's column
         let new_plan = if let LogicalPlan::DependentJoin(DependentJoin { .. }) = plan {
             return internal_err!(
-                "logical error, this function should not be called if one of the plan is still dependent join node");
+                "logical error, this function should not be called if one of the plan is still dependent join node, plan: {plan}");
         } else {
             plan
         };
@@ -470,22 +479,21 @@ impl DependentJoinDecorrelator {
         self.dscan_cols.clear();
 
         // Collect all correlated columns of different outer table.
-        let mut domains_by_table: IndexMap<String, Vec<CorrelatedColumnInfo>> =
+        let mut domains_by_delim_scan_node_id: IndexMap<usize, Vec<CorrelatedColumnInfo>> =
             IndexMap::new();
 
         for domain in &self.domains {
-            let table_ref = domain
-                .col
-                .relation
-                .clone()
-                .ok_or(internal_datafusion_err!(
-                    "TableRef should exists in correlatd column"
-                ))?
-                .clone();
-            let domains = domains_by_table.entry(table_ref.to_string()).or_default();
+            // let table_ref = domain
+            //     .col
+            //     .relation
+            //     .clone()
+            //     .ok_or(internal_datafusion_err!(
+            //         "TableRef should exists in correlatd column"
+            //     ))?
+            //     .clone();
+            let domains = domains_by_delim_scan_node_id.entry(domain.delim_scan_node_id).or_default();
             if !domains.iter().any(|existing| {
-                (&existing.col == &domain.col)
-                    && (&existing.field == &domain.field)
+                (&existing.col == &domain.col) && (&existing.field == &domain.field)
             }) {
                 domains.push(domain.clone());
             }
@@ -493,10 +501,18 @@ impl DependentJoinDecorrelator {
 
         // Collect all D from different tables.
         let mut delim_scans = vec![];
-        for (table_ref, table_domains) in domains_by_table {
+        for (delim_scan_node_id, table_domains) in domains_by_delim_scan_node_id {
             self.delim_scan_id += 1;
+            let node = self.delim_scan_nodes.get(&delim_scan_node_id).ok_or(internal_datafusion_err!("delim scan node with id {delim_scan_node_id} not found"))?;
+            let delim_name = match node{
+                LogicalPlan::TableScan(table_scan) => table_scan.table_name.clone(),
+                LogicalPlan::SubqueryAlias(subquery_alias) => subquery_alias.alias.clone(),
+                _ => {
+                    return internal_err!("delim scan node with id {delim_scan_node_id} is not a table scan or subquery alias");
+                }
+            };
             let delim_scan_name =
-                format!("{0}_dscan_{1}", table_ref.clone(), self.delim_scan_id);
+                format!("{0}_dscan_{1}", delim_name, self.delim_scan_id);
 
             let mut projection_exprs = vec![];
             table_domains.iter().for_each(|c| {
@@ -518,7 +534,7 @@ impl DependentJoinDecorrelator {
 
             // Apply projection to rename columns and then alias the entire plan.
             delim_scans.push(
-                LogicalPlanBuilder::delim_get(&table_domains)?
+                LogicalPlanBuilder::delim_get(delim_name, &node, &table_domains)?
                     .project(projection_exprs)?
                     .build()?,
             );
@@ -613,8 +629,9 @@ impl DependentJoinDecorrelator {
                 }
                 other => {
                     if self.domains.is_empty() {
+                        let decorrelated = self.decorrelate(other, true, 0)?;
                         // No correlated columns, nothing to do.
-                        return Ok(other.clone());
+                        return Ok(decorrelated);
                     }
 
                     let delim_scan = self.build_delim_scan()?;
@@ -659,19 +676,19 @@ impl DependentJoinDecorrelator {
                 let mut proj = old_proj.clone();
                 proj.input = Arc::new(if exit_projection {
                     if self.domains.is_empty() {
-                        return Ok(LogicalPlan::Projection(proj));
+                        self.decorrelate(proj.input.deref(), true, 0)?
+                    } else {
+                        let delim_scan = self.build_delim_scan()?;
+                        let new_left = self.decorrelate(proj.input.deref(), true, 0)?;
+                        LogicalPlanBuilder::new(new_left)
+                            .join(
+                                delim_scan,
+                                JoinType::Inner,
+                                (Vec::<Column>::new(), Vec::<Column>::new()),
+                                None,
+                            )?
+                            .build()?
                     }
-
-                    let delim_scan = self.build_delim_scan()?;
-                    let new_left = self.decorrelate(proj.input.deref(), true, 0)?;
-                    LogicalPlanBuilder::new(new_left)
-                        .join(
-                            delim_scan,
-                            JoinType::Inner,
-                            (Vec::<Column>::new(), Vec::<Column>::new()),
-                            None,
-                        )?
-                        .build()?
                 } else {
                     self.push_down_dependent_join_internal(
                         proj.input.as_ref(),
@@ -1312,9 +1329,9 @@ impl DependentJoinDecorrelator {
                     false,
                 )
             }
-            plan_ => {
-                unimplemented!("implement pushdown dependent join for node {plan_}")
-            }
+            plan_ => Err(not_impl_datafusion_err!(
+                "implement pushdown dependent join for node {plan_}"
+            ))?,
         }
     }
 
@@ -1479,6 +1496,13 @@ impl DecorrelateDependentJoin {
         return DecorrelateDependentJoin {};
     }
 }
+macro_rules! debug_println {
+    ($($arg:tt)*) => {
+        if std::env::var("PLAN_DEBUG").is_ok() {
+            println!($($arg)*);
+        }
+    };
+}
 
 impl OptimizerRule for DecorrelateDependentJoin {
     fn supports_rewrite(&self) -> bool {
@@ -1494,25 +1518,32 @@ impl OptimizerRule for DecorrelateDependentJoin {
         plan: LogicalPlan,
         config: &dyn OptimizerConfig,
     ) -> Result<Transformed<LogicalPlan>> {
+        debug_println!("original plan\n{}", plan.display_indent());
         let mut transformer =
             DependentJoinRewriter::new(Arc::clone(config.alias_generator()));
-        let rewrite_result = transformer.rewrite_subqueries_into_dependent_joins(plan)?;
+        let rewrite_result =
+            match transformer.rewrite_subqueries_into_dependent_joins(plan.clone()) {
+                Err(e) => Transformed::no(plan),
+                Ok(transformed) => transformed,
+            };
+
 
         if rewrite_result.transformed {
-            println!(
+            debug_println!(
                 "dependent join plan\n{}",
                 rewrite_result.data.display_indent()
             );
-            let mut decorrelator = DependentJoinDecorrelator::new_root();
+            let mut decorrelator = DependentJoinDecorrelator::new_root(transformer.delim_scan_nodes.clone());
             let ret = decorrelator.decorrelate(&rewrite_result.data, true, 0)?;
 
-            println!("{}", ret.display_indent_schema());
-            return Ok(Transformed::yes(ret));
-            // return Ok(Transformed::yes(decorrelator.decorrelate(
-            //     &rewrite_result.data,
-            //     true,
-            //     0,
-            // )?));
+            debug_println!("decorrelated plan\n{}", ret.display_indent(),);
+            let deliminator = Deliminator::new();
+            let ret = deliminator.rewrite(ret, config)?;
+            if ret.transformed {
+                debug_println!("deliminated plan\n{}", ret.data.display_indent());
+            }
+
+            return Ok(ret);
         }
 
         Ok(rewrite_result)
